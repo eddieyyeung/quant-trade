@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>量化周报 {{ report_date }}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
+  .container { max-width: 960px; margin: 0 auto; }
+  h1 { text-align: center; margin-bottom: 8px; font-size: 24px; }
+  .subtitle { text-align: center; color: #888; margin-bottom: 24px; font-size: 14px; }
+
+  {% if not is_friday %}
+  .warning { background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 12px 20px; margin-bottom: 20px; color: #856404; font-weight: 500; }
+  {% endif %}
+
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .card { background: #fff; border-radius: 8px; padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .card .label { font-size: 12px; color: #999; margin-bottom: 6px; }
+  .card .value { font-size: 22px; font-weight: 700; }
+  .card .sub { font-size: 12px; color: #aaa; margin-top: 4px; }
+  .positive { color: #22c55e; }
+  .negative { color: #ef4444; }
+
+  .section { background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+  .section h2 { font-size: 18px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #eee; }
+
+  .chart-img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { background: #fafafa; padding: 10px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #eee; }
+  td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
+  tr:hover { background: #f9f9f9; }
+  .buy-row { background: #f0fff4; }
+  .sell-row { background: #fff5f5; }
+
+  .tag-buy { background: #22c55e; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .tag-sell { background: #ef4444; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+
+  .footer { text-align: center; color: #999; font-size: 12px; margin-top: 20px; padding: 16px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>量化周报</h1>
+  <p class="subtitle">{{ report_date }}</p>
+
+  {% if not is_friday %}
+  <div class="warning">⚠️ 非调仓日运行 — 信号基于最近周五 {{ signal_date }} 数据，仅供参考</div>
+  {% endif %}
+
+  <!-- Overview Cards -->
+  <div class="cards">
+    <div class="card">
+      <div class="label">当前市值</div>
+      <div class="value">¥{{ "{:,.0f}".format(metrics.current_value) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">累计收益</div>
+      <div class="value {{ 'positive' if metrics.total_return >= 0 else 'negative' }}">{{ "{:+.2f}%".format(metrics.total_return * 100) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">夏普比率</div>
+      <div class="value">{{ "{:.2f}".format(metrics.sharpe_ratio) if metrics.sharpe_ratio else '-' }}</div>
+    </div>
+    <div class="card">
+      <div class="label">最大回撤</div>
+      <div class="value negative">{{ "{:.2f}%".format(metrics.max_drawdown * 100) if metrics.max_drawdown else '-' }}</div>
+    </div>
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="label">本周收益</div>
+      <div class="value {{ 'positive' if metrics.weekly_return >= 0 else 'negative' }}">{{ "{:+.2f}%".format(metrics.weekly_return * 100) }}</div>
+    </div>
+    <div class="card">
+      <div class="label">基准（沪深300）</div>
+      <div class="value">{{ "{:+.2f}%".format(metrics.benchmark_return * 100) if metrics.benchmark_return else '-' }}</div>
+    </div>
+    <div class="card">
+      <div class="label">超额收益</div>
+      <div class="value {{ 'positive' if metrics.excess_return >= 0 else 'negative' }}">{{ "{:+.2f}%".format(metrics.excess_return * 100) if metrics.excess_return else '-' }}</div>
+    </div>
+    <div class="card">
+      <div class="label">周胜率</div>
+      <div class="value">{{ "{:.1f}%".format(metrics.win_rate * 100) if metrics.win_rate else '-' }}</div>
+    </div>
+  </div>
+
+  {% if nav_chart %}
+  <!-- NAV Chart -->
+  <div class="section">
+    <h2>📈 净值曲线</h2>
+    <img class="chart-img" src="data:image/png;base64,{{ nav_chart }}" alt="净值曲线">
+  </div>
+  {% endif %}
+
+  {% if signals %}
+  <!-- Rebalance Signals -->
+  <div class="section">
+    <h2>📋 下周调仓信号</h2>
+    <table>
+      <thead>
+        <tr><th>操作</th><th>代码</th><th>名称</th><th>目标仓位</th><th>信号理由</th></tr>
+      </thead>
+      <tbody>
+      {% for s in signals %}
+        <tr class="{{ 'buy-row' if s.direction == 'BUY' else 'sell-row' }}">
+          <td><span class="{{ 'tag-buy' if s.direction == 'BUY' else 'tag-sell' }}">{{ '买入' if s.direction == 'BUY' else '卖出' }}</span></td>
+          <td>{{ s.ts_code }}</td>
+          <td>{{ s.name }}</td>
+          <td>{{ "{:.1f}%".format(s.target_pct * 100) }}</td>
+          <td>{{ s.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if holdings %}
+  <!-- Current Holdings -->
+  <div class="section">
+    <h2>📊 当前持仓</h2>
+    <table>
+      <thead>
+        <tr><th>代码</th><th>名称</th><th>持仓成本</th><th>当前价格</th><th>浮动盈亏</th></tr>
+      </thead>
+      <tbody>
+      {% for h in holdings %}
+        <tr>
+          <td>{{ h.ts_code }}</td>
+          <td>{{ h.name }}</td>
+          <td>¥{{ "{:.2f}".format(h.avg_cost) }}</td>
+          <td>¥{{ "{:.2f}".format(h.current_price) }}</td>
+          <td class="{{ 'positive' if h.pnl_pct >= 0 else 'negative' }}">{{ "{:+.2f}%".format(h.pnl_pct * 100) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if factor_ic %}
+  <!-- Factor IC -->
+  <div class="section">
+    <h2>🎯 因子表现跟踪</h2>
+    <table>
+      <thead>
+        <tr><th>因子</th><th>本周 IC</th><th>累计 IC 均值</th><th>ICIR</th></tr>
+      </thead>
+      <tbody>
+      {% for f in factor_ic %}
+        <tr>
+          <td>{{ f.name }}</td>
+          <td class="{{ 'positive' if f.ic_weekly >= 0 else 'negative' }}">{{ "{:+.4f}".format(f.ic_weekly) if f.ic_weekly else '-' }}</td>
+          <td class="{{ 'positive' if f.ic_mean >= 0 else 'negative' }}">{{ "{:+.4f}".format(f.ic_mean) if f.ic_mean else '-' }}</td>
+          <td>{{ "{:.2f}".format(f.ic_ir) if f.ic_ir else '-' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="footer">
+    <p>数据更新: {{ updated_at }} | 下次调仓: {{ next_rebalance }} | 初始资金: ¥{{ "{:,.0f}".format(initial_capital) }}</p>
+    <p style="margin-top:4px;">本报告仅供研究参考，不构成投资建议。投资有风险，入市需谨慎。</p>
+  </div>
+</div>
+</body>
+</html>
