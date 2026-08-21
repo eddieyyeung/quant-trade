@@ -226,7 +226,14 @@ __marimo__/
 .Trashes
 .fseventsd
 
-# Project specific — generated outputs
-data/
+# Node / frontend tooling
+node_modules/
+
+# Project specific — generated outputs (repo-root dir only; NOT the src/quant_trade/data/ package)
+/data/
 reports/
 .scratch/
+
+# Stray root-level npm install (frontend lives in web/)
+/package.json
+/package-lock.json

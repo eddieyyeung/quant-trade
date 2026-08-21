@@ -56,7 +56,14 @@ def _render_nav_chart(
             bm_aligned = benchmark.loc[common]
             # Normalize benchmark to same starting point as strategy
             bm_normalized = bm_aligned / bm_aligned.iloc[0] if bm_aligned.iloc[0] != 0 else bm_aligned
-            ax.plot(common, np.asarray(bm_normalized.values, dtype=float), label="沪深300", color="#9ca3af", linewidth=1, linestyle="--")
+            ax.plot(
+                common,
+                np.asarray(bm_normalized.values, dtype=float),
+                label="沪深300",
+                color="#9ca3af",
+                linewidth=1,
+                linestyle="--",
+            )
 
     ax.axhline(y=1.0, color="#e5e7eb", linewidth=0.5)
     ax.set_ylabel("累计净值")

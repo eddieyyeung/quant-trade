@@ -43,8 +43,12 @@ dev = [
     "ipykernel>=6.0",
     "types-pyyaml>=6.0",
 ]
+web = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 all = [
-    "quant-trade[data,analysis,backtest,dev]",
+    "quant-trade[data,analysis,backtest,dev,web]",
 ]
 
 [project.scripts]

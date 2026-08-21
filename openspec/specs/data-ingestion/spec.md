@@ -2,7 +2,7 @@
 
 TBD — see design.md for architecture context.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: DuckDB 存储日线行情
 

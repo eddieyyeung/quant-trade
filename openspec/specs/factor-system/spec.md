@@ -2,7 +2,7 @@
 
 TBD — see design.md for architecture context.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: 因子基类定义
 

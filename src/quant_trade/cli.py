@@ -12,7 +12,7 @@ from quant_trade.config import DEFAULT_CONFIG_PATH, AppConfig
 from quant_trade.data.index_weights import get_default_universe, sync_index_weights
 from quant_trade.data.sources.akshare_adapter import AkshareAdapter
 from quant_trade.data.store import DataStore
-from quant_trade.data.sync import sync_all, sync_daily_kline, sync_financials
+from quant_trade.data.sync import sync_all, sync_daily_kline, sync_financials, sync_index_daily
 from quant_trade.factors.registry import registry as factor_registry
 from quant_trade.signals.reporter import generate_weekly_report, save_report
 from quant_trade.strategies.registry import strategy_registry
@@ -39,6 +39,8 @@ def main() -> None:
         _cmd_backtest(args[1], config, args[2:])
     elif cmd == "weekly":
         _cmd_weekly(config)
+    elif cmd == "sim" and len(args) >= 2:
+        _cmd_sim(args[1], config, args[2:])
     elif cmd == "help" or cmd == "--help" or cmd == "-h":
         _usage()
     else:
@@ -57,6 +59,8 @@ def _cmd_data(sub: str, config: AppConfig) -> None:
         results = sync_all(store, [], primary=config.data.primary_source, include_financials=False)
         logger.info("Step 2/4: Syncing index weights...")
         sync_index_weights(store, get_default_universe(), date.today(), adapter)
+        logger.info("Step 2.5/4: Syncing index daily kline (benchmark)...")
+        sync_index_daily(store, adapter, get_default_universe())
         logger.info("Step 3/4: Getting universe codes...")
         codes = store.get_universe(get_default_universe(), date.today())
         if not codes:
@@ -368,6 +372,172 @@ def _cmd_weekly(config: AppConfig) -> None:
         webbrowser.open(str(path.resolve()))
 
 
+def _cmd_sim(sub: str, config: AppConfig, extra: list[str]) -> None:
+    """Handle 'sim' subcommands."""
+    from quant_trade.simulator.engine import Simulator
+
+    sim = Simulator(db_path=config.data.db_path, data_dir=str(config.data.db_path).replace("quant.db", ""))
+
+    if sub == "start":
+        name = _extract_arg(extra, "--name", "未命名会话")
+        start_str = _extract_arg(extra, "--start", "2023-01-01")
+        end_str = _extract_arg(extra, "--end", "")
+        capital_str = _extract_arg(extra, "--capital", "100000")
+        ref = _extract_arg(extra, "--ref", "")
+
+        start_date = date.fromisoformat(start_str)
+        end_date = date.fromisoformat(end_str) if end_str else None
+        capital = float(capital_str)
+        ref_strat = ref if ref else None
+
+        print(f"创建会话: {name}")
+        print(f"周期: {start_date} → {end_date or '最新'}")
+        print(f"初始资金: ¥{capital:,.0f}")
+        print()
+
+        result = sim.create(
+            name=name,
+            start_date=start_date,
+            end_date=end_date,
+            initial_capital=capital,
+            reference_strategy=ref_strat,
+        )
+        print(f"会话ID: {result['session_id']}")
+        print(f"起始周五: {result['cursor_date']}")
+        print(f"共 {result['total_weeks']} 周")
+        if ref_strat:
+            print(f"参考策略: {ref_strat}")
+
+    elif sub == "resume":
+        session_id = extra[0] if extra else ""
+        if not session_id:
+            print("用法: sim resume <session_id>")
+            return
+        result = sim.resume(session_id)
+        print(f"会话: {session_id}")
+        print(f"当前日期: {result['cursor_date']} (第 {result['week_number']}/{result['total_weeks']} 周)")
+        print(f"组合市值: ¥{result['portfolio_value']:,.2f}")
+        print(f"已决策: {result['previous_decisions']} 次")
+
+    elif sub == "step":
+        session_id = extra[0] if extra else ""
+        if not session_id:
+            print('用法: sim step <session_id> --buy "code:pct" --sell "code"')
+            return
+        from quant_trade.simulator.types import OrderRequest
+
+        orders: list[OrderRequest] = []
+        # Parse --buy and --sell
+        i = 1
+        while i < len(extra):
+            if extra[i] == "--buy" and i + 1 < len(extra):
+                parts = extra[i + 1].split(":")
+                if len(parts) == 2:
+                    orders.append(OrderRequest(ts_code=parts[0], target_pct=float(parts[1]) / 100, direction="BUY"))
+                i += 2
+            elif extra[i] == "--sell" and i + 1 < len(extra):
+                orders.append(OrderRequest(ts_code=extra[i + 1], target_pct=0.0, direction="SELL"))
+                i += 2
+            else:
+                i += 1
+
+        note = _extract_arg(extra, "--note", "")
+        step_result = sim.step(session_id, orders, notes=note)
+        print(f"决策 #{step_result.decision.decision_number} 执行完成")
+        for o in step_result.decision.executed_orders:
+            tag = "BUY " if o.direction == "BUY" else "SELL"
+            print(f"  {tag} {o.ts_code}  {o.shares}股 @ ¥{o.price:.2f}  ({o.reason})")
+        if step_result.warnings:
+            for w in step_result.warnings:
+                print(f"  ⚠️ {w}")
+        print(f"组合市值: ¥{step_result.portfolio_total_value:,.2f} | 现金: ¥{step_result.portfolio_cash:,.2f}")
+        print(f"下一周五: {step_result.next_cursor_date}")
+
+    elif sub == "skip":
+        session_id = extra[0] if extra else ""
+        if not session_id:
+            print("用法: sim skip <session_id>")
+            return
+        step_result = sim.skip(session_id)
+        print("跳过本周调仓")
+        print(f"下一周五: {step_result.next_cursor_date}")
+
+    elif sub == "status":
+        session_id = extra[0] if extra else ""
+        if not session_id:
+            print("用法: sim status <session_id>")
+            return
+        s = sim.status(session_id)
+        print(f"会话: {s['name']} ({s['session_id'][:8]}...)")
+        print(f"状态: {s['status']}")
+        print(f"当前: 第 {s['week_number']}/{s['total_weeks']} 周 ({s['cursor_date']})")
+        print(f"市值: ¥{s['portfolio_value']:,.2f} | 现金: ¥{s['cash']:,.2f} | 持仓: {s['holding_count']} 只")
+        print(f"已决策: {s['decision_count']} 次")
+        if s.get("reference_strategy"):
+            print(f"参考策略: {s['reference_strategy']}")
+
+    elif sub == "compare":
+        session_id = extra[0] if extra else ""
+        if not session_id:
+            print("用法: sim compare <session_id> [--html]")
+            return
+        export_html = "--html" in extra
+        from quant_trade.simulator.comparison import ComparisonEngine
+        from quant_trade.simulator.session import SessionStore
+
+        store = DataStore(config.data.db_path)
+        sstore = SessionStore(store.conn, data_dir=str(config.data.db_path).replace("quant.db", ""))
+        engine = ComparisonEngine(store, sstore)
+        cmp_result = engine.compare(session_id, export_html=export_html)
+
+        m = cmp_result.metrics.get("manual", {})
+        print(f"\n=== 对比报告 ({cmp_result.weeks_completed} 周) ===")
+        print(
+            f"手动: 累计 {m.get('total_return', 0):.2%} | 夏普 {m.get('sharpe_ratio', 0):.2f} | 回撤 {m.get('max_drawdown', 0):.2%}"
+        )
+        if "strategy" in cmp_result.metrics:
+            s = cmp_result.metrics["strategy"]
+            print(
+                f"策略: 累计 {s.get('total_return', 0):.2%} | 夏普 {s.get('sharpe_ratio', 0):.2f} | 回撤 {s.get('max_drawdown', 0):.2%}"
+            )
+        if "benchmark" in cmp_result.metrics:
+            bm = cmp_result.metrics["benchmark"]
+            print(f"基准: 累计 {bm.get('total_return', 0):.2%}")
+        if cmp_result.html_path:
+            print(f"\nHTML 报告: {cmp_result.html_path}")
+
+    elif sub == "web":
+        port_str = _extract_arg(extra, "--port", "8000")
+        host = _extract_arg(extra, "--host", "0.0.0.0")
+        port = int(port_str)
+        try:
+            import uvicorn
+
+            from quant_trade.simulator.api import create_app
+        except ImportError:
+            print("需要安装 web 依赖: uv pip install fastapi uvicorn")
+            return
+        app = create_app()
+        print(f"API 后端已启动: http://{host}:{port}")
+        print("前端文件: src/quant_trade/templates/simulator.html")
+        print("可打开该 HTML 文件，或通过任意静态服务器托管")
+        uvicorn.run(app, host=host, port=port, log_level="info")
+
+    else:
+        print(f"Unknown sim command: {sub}")
+        print("Available: sim start, sim resume, sim step, sim skip, sim status, sim compare, sim web")
+
+
+def _extract_arg(args: list[str], flag: str, default: str = "") -> str:
+    """Extract a --flag value from a list of args."""
+    for i, a in enumerate(args):
+        if a == flag and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return default
+
+
 def _usage() -> None:
     """Print usage information."""
     print("quant-trade — A-Share Quantitative Research Platform")
@@ -385,6 +555,16 @@ def _usage() -> None:
     print("  backtest run [--start YYYY-MM-DD] [--end YYYY-MM-DD]")
     print("                                     Run backtest")
     print("  weekly                             Full pipeline → HTML report")
+    print("  sim start --name SESSION --start DATE [--end DATE] [--capital AMT] [--ref STRATEGY]")
+    print("                                     Create a new simulation session")
+    print("  sim resume <id>                    Resume a session")
+    print("  sim step <id> [--buy code:pct] [--sell code] [--note TEXT]")
+    print("                                     Execute a week's decisions")
+    print("  sim skip <id>                      Skip this week without trading")
+    print("  sim status <id>                    Show session status")
+    print("  sim compare <id> [--html]          Show comparison report")
+    print("  sim web [--port 8000] [--host 0.0.0.0]")
+    print("                                     Launch web UI")
     print("  help                               Show this help")
     print()
     print(f"Config: {DEFAULT_CONFIG_PATH}")

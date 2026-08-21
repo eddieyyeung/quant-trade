@@ -1,8 +1,8 @@
 ## Purpose
 
-TBD — see design.md for architecture context.
+Backtest engine capabilities: weekly loop applying A-share trading rules (T+1, price limits, fees, suspension handling), portfolio accounting, performance metrics, and terminal/paper-trading integration via the same strategy code path.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: 逐周回测循环
 
@@ -100,7 +100,7 @@ TBD — see design.md for architecture context.
 
 ### Requirement: 回测=模拟盘统一接口
 
-同一策略对象，同一 `generate_signals` 方法，回测模式和模拟盘模式使用完全相同的代码路径。模拟盘仅将 `end_date` 设为今天，不计算历史绩效曲线。
+系统 SHALL 保证同一策略对象、同一 `generate_signals` 方法在回测模式和模拟盘模式使用完全相同的代码路径。模拟盘仅将 `end_date` 设为今天，不计算历史绩效曲线。
 
 #### Scenario: 模拟盘信号生成
 

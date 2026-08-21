@@ -1,10 +1,16 @@
 """Factor abstract base class and type definitions."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from datetime import date
 from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from quant_trade.data.store import DataStore
 
 
 class FactorCategory(StrEnum):
@@ -22,6 +28,10 @@ class Factor(ABC):
 
     name: str = ""
     category: FactorCategory = FactorCategory.MOMENTUM
+
+    def __init__(self, store: DataStore | None = None) -> None:
+        """Initialize factor with optional shared DataStore."""
+        self.store: Any = store
 
     @abstractmethod
     def compute(self, date: date, universe: list[str]) -> pd.Series:
