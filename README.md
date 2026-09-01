@@ -165,6 +165,27 @@ uv run quant-trade strategy run
 
 维护 `portfolio.json` 记录虚拟持仓。每周按信号手动操作后更新文件。
 
+## Web 服务（前后端）
+
+模拟盘配有 Web 界面：FastAPI 后端 + React/Vite 前端。前端通过 Vite 代理转发 `/api` 请求到后端。
+
+```bash
+# 1. 安装后端依赖（一次性）
+uv sync --extra web
+
+# 2. 启动后端（终端 1）
+uv run quant-trade sim web
+# API 后端已启动: http://localhost:9555
+
+# 3. 安装并启动前端（终端 2）
+cd web
+npm install
+npm run dev
+# 打开 http://localhost:9333
+```
+
+前端启动后访问 http://localhost:9333，所有 `/api` 请求由 Vite 自动转发到 `http://localhost:9555`（见 `web/vite.config.ts` 的 proxy 配置）。后端默认端口即 9555，与代理一致，如需改端口需同步修改 `web/vite.config.ts`。
+
 ## 周报
 
 自动生成的 HTML 报告包含 5 个区域：
@@ -230,8 +251,10 @@ quant-trade/
 │   │   ├── portfolio.py     # 持仓管理
 │   │   └── rules.py         # A 股规则
 │   ├── signals/reporter.py  # HTML 报告生成
+│   ├── simulator/           # 模拟盘（引擎、会话存储、FastAPI 后端）
 │   ├── config.py            # Pydantic 配置
 │   └── cli.py               # CLI 入口
+├── web/                     # React + Vite 前端（模拟盘 Web UI）
 └── tests/                   # 测试
 ```
 
@@ -242,3 +265,5 @@ quant-trade/
 - **配置**: pydantic, pyyaml, python-dotenv
 - **报告**: matplotlib, jinja2
 - **日志**: loguru
+- **Web 后端**: fastapi, uvicorn（`uv sync --extra web` 安装）
+- **Web 前端**: React 19 + Vite（`web/` 目录，独立 `npm install`）

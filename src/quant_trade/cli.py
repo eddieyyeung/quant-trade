@@ -507,7 +507,7 @@ def _cmd_sim(sub: str, config: AppConfig, extra: list[str]) -> None:
             print(f"\nHTML 报告: {cmp_result.html_path}")
 
     elif sub == "web":
-        port_str = _extract_arg(extra, "--port", "8000")
+        port_str = _extract_arg(extra, "--port", "9555")
         host = _extract_arg(extra, "--host", "0.0.0.0")
         port = int(port_str)
         try:
@@ -563,7 +563,7 @@ def _usage() -> None:
     print("  sim skip <id>                      Skip this week without trading")
     print("  sim status <id>                    Show session status")
     print("  sim compare <id> [--html]          Show comparison report")
-    print("  sim web [--port 8000] [--host 0.0.0.0]")
+    print("  sim web [--port 9555] [--host 0.0.0.0]")
     print("                                     Launch web UI")
     print("  help                               Show this help")
     print()

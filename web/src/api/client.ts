@@ -7,7 +7,7 @@ import type {
   OrderRequest,
 } from '../types';
 
-// Dev mode: Vite proxy handles /api → localhost:8000
+// Dev mode: Vite proxy handles /api → localhost:9555
 // Production: set VITE_API_BASE env or point to deployed backend
 const BASE = import.meta.env.VITE_API_BASE || '/api';
 
