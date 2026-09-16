@@ -22,9 +22,12 @@ quant-trade data status                         # Show database status
 quant-trade factor update                       # Compute all enabled factors
 quant-trade factor list                         # List registered factors
 quant-trade factor ic                           # Factor IC summary
+quant-trade factor alpha158 [--start DATE]      # Compute & persist 158 Alpha158 factors
 quant-trade strategy run                        # Generate trading signals
 quant-trade strategy list                       # List registered strategies
 quant-trade backtest run [--start DATE] [--end DATE]  # Run backtest
+quant-trade model train [--start DATE] [--end DATE] [--output PATH]  # Walk-forward LightGBM
+quant-trade model predict [--date DATE]         # Model top picks for a date
 quant-trade weekly                              # Full pipeline → HTML report
 ```
 
@@ -51,7 +54,9 @@ pytest is configured in `pyproject.toml` with `pythonpath = ["src"]` — imports
 **Package layout — `src` layout with flat namespace:**
 - `quant_trade.data` — market data ingestion (akshare/tushare adapters, DuckDB storage, trade calendar)
 - `quant_trade.factors` — factor computation framework (momentum/value/quality), preprocessing, IC analysis
-- `quant_trade.strategies` — strategy engine (base class, factor ranking, signal generation)
+- `quant_trade.factors.alpha158` — vectorized Alpha158 library (158 qlib factors, polars operators, DuckDB persistence)
+- `quant_trade.models` — ML pipeline (feature matrix, T+2 labels, LightGBM walk-forward, RankIC evaluation)
+- `quant_trade.strategies` — strategy engine (base class, factor ranking, model ranking, signal generation)
 - `quant_trade.backtest` — A-share backtest engine (T+1, price limits, fees, suspension handling)
 - `quant_trade.signals` — weekly HTML report generation (Jinja2 + matplotlib)
 - `quant_trade.utils` — shared helpers

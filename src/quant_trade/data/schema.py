@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS simulator_session (
     updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS factor_values (
+    factor_name  VARCHAR,
+    ts_code      VARCHAR,
+    trade_date   DATE,
+    value        DOUBLE,
+    PRIMARY KEY (factor_name, ts_code, trade_date)
+);
+
 CREATE TABLE IF NOT EXISTS financials (
     ts_code      VARCHAR,
     end_date     DATE,

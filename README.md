@@ -45,6 +45,13 @@ uv run quant-trade data status                    # 查看数据库状态
 uv run quant-trade factor update                  # 计算全部启用因子
 uv run quant-trade factor list                    # 列出已注册因子
 uv run quant-trade factor ic                      # 查看因子 IC 摘要
+uv run quant-trade factor alpha158                # 计算并落盘全部 158 个 Alpha158 因子
+
+# ===== ML 模型 =====
+uv run quant-trade model train                    # LightGBM 滚动重训练，产出预测分
+uv run quant-trade model predict                  # 查看某日模型 Top 选股
+# 用 ML 策略回测：config/default.yaml 中 strategy.name 改为 model_ranking
+uv run quant-trade backtest run
 
 # ===== 策略 =====
 uv run quant-trade strategy list                  # 列出已注册策略

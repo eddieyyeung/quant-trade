@@ -37,6 +37,8 @@ def main() -> None:
         _cmd_strategy(args[1], config)
     elif cmd == "backtest" and len(args) >= 2:
         _cmd_backtest(args[1], config, args[2:])
+    elif cmd == "model" and len(args) >= 2:
+        _cmd_model(args[1], config, args[2:])
     elif cmd == "weekly":
         _cmd_weekly(config)
     elif cmd == "sim" and len(args) >= 2:
@@ -154,6 +156,20 @@ def _cmd_factor(sub: str, config: AppConfig) -> None:
             if f:
                 print(f"  {name} [{f.category.value}]")
 
+    elif sub == "alpha158":
+        start = date.fromisoformat(_extract_arg(sys.argv, "--start", "2015-01-01"))
+        end = latest
+        logger.info(f"Computing Alpha158 factors for {len(universe)} stocks ({start} → {end})...")
+        from quant_trade.factors.alpha158 import compute_alpha158, save_factor_values
+
+        values = compute_alpha158(store, start, end, universe)
+        if values.empty:
+            logger.error("No factor values computed. Check kline data.")
+            return
+        n = save_factor_values(store, values)
+        n_factors = values["factor_name"].nunique()
+        print(f"Alpha158: {n} rows, {n_factors} factors saved to factor_values")
+
     elif sub == "ic":
         from quant_trade.factors.analysis import compute_ic_series
 
@@ -203,6 +219,8 @@ def _cmd_strategy(sub: str, config: AppConfig) -> None:
             strategy.factor_weights = config.strategy.factor_weights
         if hasattr(strategy, "max_industry_weight"):
             strategy.max_industry_weight = config.strategy.max_industry_weight
+        if hasattr(strategy, "predictions_path") and config.strategy.params.get("predictions_path"):
+            strategy.predictions_path = config.strategy.params["predictions_path"]
 
         signals = strategy.generate_signals(latest, universe, store)
         print(f"\nSignal date: {latest}")
@@ -222,6 +240,66 @@ def _cmd_strategy(sub: str, config: AppConfig) -> None:
     else:
         print(f"Unknown strategy command: {sub}")
         print("Available: strategy run, strategy list")
+
+
+def _cmd_model(sub: str, config: AppConfig, extra: list[str]) -> None:
+    """Handle 'model' subcommands."""
+    from datetime import date as dt
+
+    store = DataStore(config.data.db_path)
+    latest = store.get_latest_trade_date()
+    if latest is None:
+        logger.error("No data. Run 'quant-trade data sync' first.")
+        return
+    universe = store.get_universe(get_default_universe(), latest)
+
+    if sub == "train":
+        from quant_trade.models import rank_ic_series, save_predictions, walk_forward_train
+
+        start = dt.fromisoformat(_extract_arg(extra, "--start", "2015-01-01"))
+        end = dt.fromisoformat(_extract_arg(extra, "--end", latest.isoformat()))
+        output = _extract_arg(extra, "--output", "data/predictions/model_ranking.parquet")
+
+        logger.info(f"Walk-forward training {start} → {end} on {len(universe)} stocks...")
+        predictions, _ = walk_forward_train(store, universe, start, end)
+        if predictions.empty:
+            logger.error("Training produced no predictions")
+            return
+        save_predictions(predictions, output)
+        print(f"Predictions saved: {output} ({len(predictions)} rows)")
+
+        ic = rank_ic_series(store, universe, predictions, start, end)
+        if isinstance(ic.get("ic_mean"), float):
+            print(
+                f"RankIC mean: {ic['ic_mean']:.4f} | ICIR: {ic.get('ic_ir', float('nan')):.2f} "
+                f"| positive: {ic.get('ic_positive_ratio', float('nan')):.1%}"
+            )
+
+    elif sub == "predict":
+        from quant_trade.models import load_predictions
+
+        output = _extract_arg(extra, "--output", "data/predictions/model_ranking.parquet")
+        pred = load_predictions(output)
+        if pred.empty:
+            print(f"No predictions at {output}. Run 'quant-trade model train' first.")
+            return
+        d_str = _extract_arg(extra, "--date", latest.isoformat())
+        d = dt.fromisoformat(d_str)
+        day = pred[(pred["trade_date"] == d) & (pred["ts_code"].isin(universe))]
+        if day.empty:
+            logger.warning(f"No predictions for {d}")
+            return
+        top = day.sort_values("score", ascending=False).head(15)
+        print(f"Predictions for {d}:")
+        for row in top.itertuples(index=False):
+            print(f"  {row.ts_code}  score={row.score:.4f}")
+
+    else:
+        print(f"Unknown model command: {sub}")
+        print(
+            "Available: model train [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--output PATH], "
+            "model predict [--date YYYY-MM-DD] [--output PATH]"
+        )
 
 
 def _cmd_backtest(sub: str, config: AppConfig, extra: list[str]) -> None:
@@ -250,6 +328,10 @@ def _cmd_backtest(sub: str, config: AppConfig, extra: list[str]) -> None:
             strategy.top_n = config.strategy.top_n
         if hasattr(strategy, "factor_weights"):
             strategy.factor_weights = config.strategy.factor_weights
+        if hasattr(strategy, "max_industry_weight"):
+            strategy.max_industry_weight = config.strategy.max_industry_weight
+        if hasattr(strategy, "predictions_path") and config.strategy.params.get("predictions_path"):
+            strategy.predictions_path = config.strategy.params["predictions_path"]
 
         logger.info(f"Running backtest {start} → {end}...")
         result = run_backtest(
@@ -550,6 +632,11 @@ def _usage() -> None:
     print("  factor update                      Compute all enabled factors")
     print("  factor list                        List registered factors")
     print("  factor ic                          Show factor IC summary")
+    print("  factor alpha158 [--start DATE]     Compute & save all 158 Alpha158 factors")
+    print("  model train [--start DATE] [--end DATE] [--output PATH]")
+    print("                                     Walk-forward LightGBM training")
+    print("  model predict [--date DATE] [--output PATH]")
+    print("                                     Show model top picks for a date")
     print("  strategy run                       Generate trading signals")
     print("  strategy list                      List registered strategies")
     print("  backtest run [--start YYYY-MM-DD] [--end YYYY-MM-DD]")
