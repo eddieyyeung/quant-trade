@@ -1,0 +1,108 @@
+## Purpose
+
+Backtest engine capabilities: weekly loop applying A-share trading rules (T+1, price limits, fees, suspension handling), portfolio accounting, performance metrics, and terminal/paper-trading integration via the same strategy code path.
+
+## Requirements
+
+### Requirement: 逐周回测循环
+
+系统 SHALL 按周遍历回测区间，每周五收盘后生成信号，下周一开盘价执行交易，更新虚拟持仓和现金。
+
+#### Scenario: 完整回测流程
+
+- **WHEN** 用户执行 `quant-trade backtest run --start 2020-01-01 --end 2025-12-31`
+- **THEN** 系统返回：净值曲线序列、年化收益率、夏普比率、最大回撤、Calmar比率、周胜率、总交易次数、与沪深300基准对比
+
+#### Scenario: 周度调仓日确定
+
+- **WHEN** 周五是交易日，信号在周五收盘后生成
+- **THEN** 系统以下一个交易日（通常为下周一）的开盘价执行买卖
+
+### Requirement: T+1 交易制度
+
+系统 SHALL 模拟 T+1 制度：当日买入的股票次日才能卖出。
+
+#### Scenario: T+1 卖出限制
+
+- **WHEN** 策略在周一买入股票 A，且策略在周二（次日）发出卖出信号
+- **THEN** 系统允许卖出（次日已满足 T+1）
+
+#### Scenario: 同一周内买入不能立即卖出
+
+- **WHEN** 策略在周一买入股票 A，但同一天误发出卖出 A 的信号
+- **THEN** 系统忽略该卖出信号，记录 warning 日志
+
+### Requirement: 涨跌停限制
+
+系统 SHALL 模拟 A 股涨跌停规则：10%（主板）、20%（创业板/科创板）、5%（ST/*ST）。
+
+#### Scenario: 涨停无法买入
+
+- **WHEN** 策略发出买入信号，但该股周一开盘价等于涨停价
+- **THEN** 系统跳过该买入订单，记录 "涨停未成交" 日志，资金保留为现金
+
+#### Scenario: 跌停无法卖出
+
+- **WHEN** 策略发出卖出信号，但该股周一开盘价等于跌停价
+- **THEN** 系统跳过该卖出订单，持仓冻结至下周再尝试
+
+#### Scenario: 创业板20%涨跌停
+
+- **WHEN** 股票代码属于创业板（300xxx.SZ），涨跌停幅度为 20%
+- **THEN** 系统根据 `stock_basic.market` 字段判断幅度并正确应用
+
+### Requirement: 交易成本计算
+
+系统 SHALL 在每次交易时扣除佣金（默认万2.5，最低5元）、卖出时扣除印花税（0.05%）、过户费（0.001%）。
+
+#### Scenario: 买入100股单价10元的股票
+
+- **WHEN** 买入金额 = 100 × 10 = 1000 元
+- **THEN** 佣金 = max(1000 × 0.00025, 5) = 5 元，过户费 = 1000 × 0.00001 = 0.01 元，实际扣除 1005.01 元
+
+#### Scenario: 卖出时扣除印花税
+
+- **WHEN** 卖出金额 = 5000 元
+- **THEN** 佣金 = max(5000 × 0.00025, 5) = 5 元，印花税 = 5000 × 0.0005 = 2.5 元，过户费 = 0.05 元，实际到账 4992.45 元
+
+### Requirement: 停牌处理
+
+系统 SHALL 检测持仓股票的停牌状态（当日成交量为 0 或涨幅为 0），停牌期间持仓冻结、不参与交易。
+
+#### Scenario: 持仓遇停牌无法卖出
+
+- **WHEN** 策略对持仓股票 B 发出卖出信号，但 B 当日停牌
+- **THEN** 系统跳过该卖出，保留持仓，记录 "停牌未成交" 日志
+
+#### Scenario: 停牌股不纳入买入候选
+
+- **WHEN** 策略运行因子计算前过滤 universe
+- **THEN** 系统自动剔除当日停牌的股票
+
+### Requirement: 绩效指标计算
+
+系统 SHALL 在回测完成后输出以下绩效指标并与基准（沪深300）对比：
+
+| 指标 | 计算方式 |
+|------|----------|
+| 年化收益率 | 累计净值的几何年化 |
+| 夏普比率 | (年化收益 - 无风险利率) / 年化波动率 |
+| 最大回撤 | 净值曲线峰谷最大跌幅百分比 |
+| Calmar比率 | 年化收益 / 最大回撤 |
+| 周胜率 | 正收益周数 / 总周数 |
+| 超额收益 | 策略年化收益 - 基准年化收益 |
+| 换手率 | 每周换手率的平均值 |
+
+#### Scenario: 输出绩效报告
+
+- **WHEN** 回测完成
+- **THEN** 系统打印终端绩效摘要（包含上述全部指标），同时返回 `BacktestResult` 对象供代码调用
+
+### Requirement: 回测=模拟盘统一接口
+
+系统 SHALL 保证同一策略对象、同一 `generate_signals` 方法在回测模式和模拟盘模式使用完全相同的代码路径。模拟盘仅将 `end_date` 设为今天，不计算历史绩效曲线。
+
+#### Scenario: 模拟盘信号生成
+
+- **WHEN** 周二运行 `quant-trade strategy run`（不在周五）
+- **THEN** 系统自动使用最近一个周五为信号日期，输出下周调仓信号

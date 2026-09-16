@@ -1,0 +1,40 @@
+data:
+  db_path: data/quant.db
+  cache_dir: data/cache
+  primary_source: akshare
+  backup_sources:
+    - baostock
+    - tushare
+
+factor:
+  enabled:
+    - momentum_20d
+    - momentum_60d
+    - ma_deviation
+    - pb_ratio
+    - pe_ratio
+    - dividend_yield
+    - roe_ttm
+    - revenue_yoy
+  params: {}
+
+strategy:
+  name: factor_ranking
+  top_n: 15
+  rebalance_freq: weekly
+  max_industry_weight: 0.30
+  factor_weights: {}
+  params: {}
+
+backtest:
+  initial_capital: 100000
+  commission_rate: 0.00025
+  min_commission: 5.0
+  stamp_duty_rate: 0.0005
+  transfer_fee_rate: 0.00001
+  start_date: 2015-01-01
+  benchmark: "000300.SH"
+
+report:
+  output_dir: reports
+  template: weekly_report.html.j2
