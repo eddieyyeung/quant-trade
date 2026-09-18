@@ -63,8 +63,12 @@ def main() -> None:
         print(f"saved {n} rows")
 
         # 2. walk-forward train
-        preds, _ = walk_forward_train(store, codes, calc_start, days[-1])
-        print(f"predictions: {len(preds)} rows, {preds['trade_date'].nunique()} dates")
+        trained = walk_forward_train(store, codes, calc_start, days[-1])
+        preds = trained.predictions
+        print(
+            f"predictions: {len(preds)} rows, {preds['trade_date'].nunique()} dates, "
+            f"{trained.windows_trained} windows, {len(trained.feature_importance)} factors ranked"
+        )
 
         # 3. rank IC
         ic = rank_ic_series(store, codes, preds)

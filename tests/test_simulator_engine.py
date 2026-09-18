@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from quant_trade.data.schema import init_db
 from quant_trade.data.store import DataStore
@@ -209,3 +210,33 @@ class TestSimulatorEngine:
                 raise AssertionError("Should have raised ValueError")
             except ValueError:
                 pass
+
+
+class TestSimulatorStoreFallback:
+    """A store-less `Simulator` resolves the configured database.
+
+    `db_path` used to default to the literal `"data/quant.db"`, so this class
+    opened the repository's own database regardless of what the process was
+    configured to use — the defect the store-injection work removed everywhere
+    else. No call site relied on it, so nothing caught it.
+    """
+
+    def test_default_db_path_follows_the_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            configured = str(Path(tmp) / "configured.db")
+            config = Path(tmp) / "config.yaml"
+            config.write_text(f"data:\n  db_path: {configured}\n", encoding="utf-8")
+            monkeypatch.setenv("QUANT_CONFIG", str(config))
+
+            sim = Simulator(data_dir=tmp)
+
+            assert sim._store.db_path == configured
+
+    def test_explicit_path_still_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.setenv("QUANT_CONFIG", str(Path(tmp) / "config.yaml"))
+            explicit = str(Path(tmp) / "explicit.db")
+
+            sim = Simulator(db_path=explicit, data_dir=tmp)
+
+            assert sim._store.db_path == explicit

@@ -141,7 +141,7 @@ class ComparisonEngine:
         self, ref_name: str, start: date, end: date, initial_capital: float
     ) -> tuple[list[dict[str, Any]] | None, dict[int, list[str]]]:
         """Run strategy backtest and return NAV + per-week holdings."""
-        strategy = strategy_registry.get(str(ref_name))
+        strategy = strategy_registry.get(str(ref_name), store=self._store)
         if strategy is None:
             return None, {}
 

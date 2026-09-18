@@ -169,22 +169,6 @@ class TestCompare:
         assert client.get("/api/sessions/nope/compare").status_code == 404
 
 
-class TestCliWebPort:
-    def test_extract_port_flag(self) -> None:
-        from quant_trade.cli import _extract_arg
-
-        assert _extract_arg(["web", "--port", "9000"], "--port", "9555") == "9000"
-        assert _extract_arg(["web", "--port=9000"], "--port", "9555") == "9000"
-
-    def test_default_port_is_9555(self) -> None:
-        import inspect
-
-        import quant_trade.cli as cli
-
-        src = inspect.getsource(cli._cmd_sim)
-        assert '_extract_arg(extra, "--port", "9555")' in src
-
-
 class TestFrontendContract:
     """Frontend dev wiring per simulator-web spec (no JS test infra — assert source contract)."""
 
@@ -195,5 +179,5 @@ class TestFrontendContract:
         assert "'/api'" in cfg
 
     def test_api_base_env_override(self) -> None:
-        src = (Path(__file__).parents[1] / "web" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
+        src = (Path(__file__).parents[1] / "web" / "src" / "api" / "http.ts").read_text(encoding="utf-8")
         assert "import.meta.env.VITE_API_BASE || '/api'" in src

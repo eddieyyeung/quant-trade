@@ -11,7 +11,7 @@
   h1 { text-align: center; margin-bottom: 8px; font-size: 24px; }
   .subtitle { text-align: center; color: #888; margin-bottom: 24px; font-size: 14px; }
 
-  {% if not is_friday %}
+  {% if not is_rebalance_day %}
   .warning { background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 12px 20px; margin-bottom: 20px; color: #856404; font-weight: 500; }
   {% endif %}
 
@@ -46,8 +46,8 @@
   <h1>量化周报</h1>
   <p class="subtitle">{{ report_date }}</p>
 
-  {% if not is_friday %}
-  <div class="warning">⚠️ 非调仓日运行 — 信号基于最近周五 {{ signal_date }} 数据，仅供参考</div>
+  {% if not is_rebalance_day %}
+  <div class="warning">⚠️ 非调仓日运行 — 信号基于 {{ signal_date }} 数据，仅供参考</div>
   {% endif %}
 
   <!-- Overview Cards -->
@@ -136,6 +136,33 @@
           <td>¥{{ "{:.2f}".format(h.avg_cost) }}</td>
           <td>¥{{ "{:.2f}".format(h.current_price) }}</td>
           <td class="{{ 'positive' if h.pnl_pct >= 0 else 'negative' }}">{{ "{:+.2f}%".format(h.pnl_pct * 100) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if trades %}
+  <!-- Trade Detail -->
+  <div class="section">
+    <h2>🧾 交易明细</h2>
+    <p class="subtitle" style="text-align:left; margin-bottom:8px;">
+      共 {{ trade_total }} 笔{% if trade_total > trade_shown %}，展示最近 {{ trade_shown }} 笔{% endif %}
+    </p>
+    <table>
+      <thead>
+        <tr><th>日期</th><th>方向</th><th>代码</th><th>股数</th><th>价格</th><th>费用</th></tr>
+      </thead>
+      <tbody>
+      {% for t in trades %}
+        <tr class="{{ 'buy-row' if t.action == 'BUY' else 'sell-row' }}">
+          <td>{{ t.date }}</td>
+          <td><span class="{{ 'tag-buy' if t.action == 'BUY' else 'tag-sell' }}">{{ '买入' if t.action == 'BUY' else '卖出' }}</span></td>
+          <td>{{ t.ts_code }}</td>
+          <td>{{ "{:,}".format(t.shares) }}</td>
+          <td>¥{{ "{:.2f}".format(t.price) }}</td>
+          <td>¥{{ "{:.2f}".format(t.fee) }}</td>
         </tr>
       {% endfor %}
       </tbody>

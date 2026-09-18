@@ -1,22 +1,45 @@
 ## Purpose
 
 Backtest engine capabilities: weekly loop applying A-share trading rules (T+1, price limits, fees, suspension handling), portfolio accounting, performance metrics, and terminal/paper-trading integration via the same strategy code path.
-
 ## Requirements
-
 ### Requirement: 逐周回测循环
 
-系统 SHALL 按周遍历回测区间，每周五收盘后生成信号，下周一开盘价执行交易，更新虚拟持仓和现金。
+系统 SHALL 按周遍历回测区间，每周五收盘后生成信号，下周一开盘价执行交易，更新虚拟持仓和现金。回测 SHALL 由回测服务函数执行，接受参数对象（回测区间、策略名、初始资金、基准、策略持仓数覆盖）与 `RunContext`。回测服务 SHALL 在 `ctx.run_id` 非空时把结果写入回测结果表（详见 `backtest-result-store`）。
 
 #### Scenario: 完整回测流程
 
-- **WHEN** 用户执行 `quant-trade backtest run --start 2020-01-01 --end 2025-12-31`
+- **WHEN** 回测服务被调用，参数为 `start=2020-01-01, end=2025-12-31`
 - **THEN** 系统返回：净值曲线序列、年化收益率、夏普比率、最大回撤、Calmar比率、周胜率、总交易次数、与沪深300基准对比
 
 #### Scenario: 周度调仓日确定
 
 - **WHEN** 周五是交易日，信号在周五收盘后生成
 - **THEN** 系统以下一个交易日（通常为下周一）的开盘价执行买卖
+
+#### Scenario: 回测过程上报进度
+
+- **WHEN** 回测服务在周循环中每完成一周
+- **THEN** 通过 `ctx.progress()` 上报已完成周数与总周数
+
+#### Scenario: 回测过程可取消
+
+- **WHEN** 回测服务在周循环中检测到 `ctx.cancelled()` 返回 `True`
+- **THEN** 停止后续周的信号生成与交易执行，返回截至当前周的净值序列
+
+#### Scenario: 取消的运行不显示为已完成
+
+- **WHEN** 回测在周循环中途被取消
+- **THEN** 上报的进度停留在取消时的完成比例，SHALL NOT 被推进到 100%
+
+#### Scenario: 持仓数覆盖
+
+- **WHEN** 参数对象显式给出持仓数覆盖值
+- **THEN** 该次回测使用的策略持仓数等于该值，其他运行与配置默认值不受影响
+
+#### Scenario: 回测结果结构化返回
+
+- **WHEN** 回测完成
+- **THEN** 净值序列、基准序列、交易明细、绩效指标、最终持仓均通过具名字段可访问，调用方无需解析控制台输出
 
 ### Requirement: T+1 交易制度
 
@@ -104,5 +127,65 @@ Backtest engine capabilities: weekly loop applying A-share trading rules (T+1, p
 
 #### Scenario: 模拟盘信号生成
 
-- **WHEN** 周二运行 `quant-trade strategy run`（不在周五）
+- **WHEN** 策略信号服务在周二被调用（不在周五）
 - **THEN** 系统自动使用最近一个周五为信号日期，输出下周调仓信号
+
+### Requirement: 回测起始日归一化
+
+系统 SHALL 在计算周度调仓日程之前，将回测起始日期归一化到该日或之后的第一个交易日。起始日期落在非交易日 SHALL NOT 导致回测周期为空。
+
+#### Scenario: 起始日为周末
+
+- **WHEN** 回测起始日是周六或周日
+- **THEN** 系统以其后第一个交易日作为实际起始日，周度调仓日程非空
+
+#### Scenario: 起始日为法定节假日
+
+- **WHEN** 回测起始日是非交易日的法定节假日（如 2015-01-01 元旦）
+- **THEN** 系统以其后第一个交易日作为实际起始日，周度调仓日程非空
+
+#### Scenario: 起始日为交易日
+
+- **WHEN** 回测起始日恰好是交易日
+- **THEN** 系统原样使用该日期，周度调仓日程与归一化前完全一致
+
+#### Scenario: 默认配置产出有效回测
+
+- **WHEN** 使用默认配置（`backtest.start_date = 2015-01-01`）运行回测且数据库有数据
+- **THEN** 绩效指标包含非零的总收益率，净值序列非空
+
+#### Scenario: 区间内无交易日
+
+- **WHEN** 起始日之后区间内不存在任何交易日
+- **THEN** 系统返回空结果并在日志中记录提示，不抛出异常
+
+#### Scenario: 与模拟盘起始日一致
+
+- **WHEN** 同一起始日分别用于回测与模拟盘会话
+- **THEN** 两者归一化到相同的实际起始日
+
+### Requirement: 回测任务类型注册
+
+系统 SHALL 将回测注册为统一运行 API 的任务类型：`kind` 为 `backtest`，参数模型为回测的参数对象，服务函数为回测服务。注册后提交回测 SHALL 经由 `POST /api/runs`，SHALL NOT 为此新增专用的写接口。
+
+运行完成时系统 SHALL 登记回测产物的产物记录，指向净值表与指标表的写入行数。
+
+#### Scenario: 提交回测任务
+
+- **WHEN** 客户端以 `kind: backtest` 与合法的参数提交到统一运行接口
+- **THEN** 立即返回 202 与 `run_id`，任务进入串行队列
+
+#### Scenario: 参数非法被拒绝
+
+- **WHEN** 提交的起始日期晚于结束日期
+- **THEN** 返回 422，且不创建运行记录
+
+#### Scenario: 进度与日志可见
+
+- **WHEN** 回测任务在周循环中运行
+- **THEN** 进度按周推进，日志可通过既有日志流实时读取
+
+#### Scenario: 产物登记
+
+- **WHEN** 回测任务产出了净值与指标行
+- **THEN** 该运行登记指向净值表与指标表的产物记录，记录写入行数

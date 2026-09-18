@@ -139,6 +139,11 @@ class TestBridge:
             assert isinstance(vals, pd.Series)
             assert len(vals) == 3
             assert f.name == "MA20"
+            # The three values above are not evidence the *fixture* was read:
+            # the repository's own `data/quant.db` holds these same codes on
+            # this same date, so a bridge that ignored the injected store would
+            # return three values too. Only the identity pins the source.
+            assert f.store is store
 
     def test_bridge_rejects_unknown(self) -> None:
         with pytest.raises(ValueError, match="Unknown Alpha158 factor"):

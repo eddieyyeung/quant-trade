@@ -8,6 +8,7 @@ from quant_trade.data.sources.akshare_adapter import AkshareAdapter
 from quant_trade.data.sources.base import DataSource
 from quant_trade.data.sources.tushare_adapter import TushareAdapter
 from quant_trade.data.store import DataStore
+from quant_trade.services.context import NULL_CONTEXT, RunContext
 
 
 def get_primary_source(store: DataStore, name: str = "akshare") -> DataSource:
@@ -50,8 +51,18 @@ def sync_daily_kline(
     codes: list[str],
     start: date,
     end: date,
+    ctx: RunContext = NULL_CONTEXT,
 ) -> int:
-    """Sync daily kline data. Returns number of rows written."""
+    """Sync daily kline data. Returns number of rows written.
+
+    Callers driving a long sync should pass a batch of codes and loop, so that
+    ``ctx`` gets a cancellation checkpoint between batches.
+    """
+    if ctx.cancelled():
+        ctx.log(f"Sync cancelled before fetching {len(codes)} codes", level="warning")
+        return 0
+
+    ctx.log(f"Fetching daily kline for {len(codes)} codes ({start} → {end}) via {adapter.source_name}")
     df = adapter.fetch_daily_kline(codes, start, end)
     if df.empty:
         logger.warning("No daily kline data fetched")
@@ -239,6 +250,7 @@ def sync_all(
     end: date | None = None,
     primary: str = "akshare",
     include_financials: bool = False,
+    ctx: RunContext = NULL_CONTEXT,
 ) -> dict[str, int]:
     """
     Run a full data sync: stock basic, trade calendar, daily kline, and optionally financials.
@@ -259,33 +271,41 @@ def sync_all(
     results: dict[str, int] = {}
 
     # Stock basic — try primary, then fallback
+    ctx.log("Syncing stock basic...")
     rows = sync_stock_basic(store, adapter)
     if rows == 0 and backups:
         rows = sync_stock_basic(store, backups[0])
     results["stock_basic"] = rows
 
     # Trade calendar
+    ctx.log("Syncing trade calendar...")
     rows = sync_trade_calendar(store, adapter, start, end)
     if rows == 0 and backups:
         rows = sync_trade_calendar(store, backups[0], start, end)
     results["trade_calendar"] = rows
 
+    if ctx.cancelled():
+        ctx.log("Sync cancelled after calendar step", level="warning")
+        results["daily_kline"] = 0
+        return results
+
     # Daily kline — only sync if we have codes
     if codes:
-        rows = sync_daily_kline(store, adapter, codes, start, end)
-        if rows == 0 and backups:
+        rows = sync_daily_kline(store, adapter, codes, start, end, ctx=ctx)
+        if rows == 0 and backups and not ctx.cancelled():
             try:
-                rows = sync_daily_kline(store, backups[0], codes, start, end)
+                rows = sync_daily_kline(store, backups[0], codes, start, end, ctx=ctx)
             except Exception as e:
-                logger.warning(f"Backup daily kline sync failed: {e}")
+                ctx.log(f"Backup daily kline sync failed: {e}", level="warning")
         results["daily_kline"] = rows
     else:
         results["daily_kline"] = 0
 
     # Financials (optional — slower)
-    if include_financials:
+    if include_financials and not ctx.cancelled():
+        ctx.log("Syncing financials...")
         rows = sync_financials(store, adapter, codes)
         results["financials"] = rows
 
-    logger.info(f"Sync complete: {results}")
+    ctx.log(f"Sync complete: {results}")
     return results
