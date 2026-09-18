@@ -27,6 +27,24 @@ DEFAULT_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+FRIDAY = 4
+"""``date.weekday()`` value for Friday.
+
+A calendar fact, not a policy: that the weekly rebalance *happens* on a Friday
+is the strategy service's convention (``services/strategies.py``). This module
+only needs to know which dates are Fridays, so it states that here rather than
+reaching up into the service layer for it.
+"""
+
+TRADE_ROWS_SHOWN = 50
+"""How many fills the report lists.
+
+A run's trade log spans the whole backtest range, not the week — an eight-year
+range holds thousands of rows, and inlining them all would make a single-file
+report that is slow to open.
+"""
+
+
 def _get_env() -> Environment:
     """Get Jinja2 environment, preferring filesystem templates, falling back to embedded."""
     template_dir = Path(__file__).parent.parent / "templates"
@@ -102,12 +120,52 @@ def _format_metrics(result: dict[str, Any], portfolio: Portfolio | None = None) 
     }
 
 
+def _format_trades(trade_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The newest ``TRADE_ROWS_SHOWN`` fills, shaped for the template.
+
+    Newest first, because a weekly report is read for what just happened; the
+    oldest fills of a long backtest are the least interesting rows in it.
+    """
+    rows: list[dict[str, Any]] = []
+    for trade in reversed(trade_log[-TRADE_ROWS_SHOWN:]):
+        # A BUY row carries no ``stamp_duty`` key at all (sell-side tax), so the
+        # fee total has to tolerate the missing key rather than sum blindly.
+        fee = sum(float(trade.get(key) or 0.0) for key in ("commission", "stamp_duty", "transfer_fee"))
+        rows.append(
+            {
+                "date": str(trade.get("date", "")),
+                "action": str(trade.get("action", "")),
+                "ts_code": str(trade.get("ts_code", "")),
+                "shares": trade.get("shares", 0),
+                "price": trade.get("price", 0.0),
+                "fee": fee,
+            }
+        )
+    return rows
+
+
+def _signal_date(result: dict[str, Any], fallback: date) -> date:
+    """The date the signals were computed for, parsed back from the result dict.
+
+    ``as_reporter_input`` writes it as ``str(date)``; parsing it here keeps that
+    one source rather than adding a second parameter that could disagree with it.
+    """
+    raw = result.get("signal_date")
+    if isinstance(raw, str):
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return fallback
+    return fallback
+
+
 def generate_weekly_report(
     result: dict[str, Any],
     signals: list[dict[str, Any]],
     config: AppConfig,
     portfolio: Portfolio | None = None,
     factor_ic_data: list[dict[str, Any]] | None = None,
+    today: date | None = None,
 ) -> str:
     """
     Generate a complete HTML weekly report.
@@ -118,6 +176,8 @@ def generate_weekly_report(
         config: AppConfig instance.
         portfolio: Optional Portfolio for holdings display.
         factor_ic_data: Optional factor IC tracking data.
+        today: Run date for the report's own timestamps. ``None`` means the
+            machine's date; injectable so a run is reproducible off its own day.
 
     Returns:
         HTML string.
@@ -128,13 +188,17 @@ def generate_weekly_report(
     except Exception:
         template = env.from_string(DEFAULT_TEMPLATE)
 
-    today = date.today()
+    today = today or date.today()
 
-    # Determine if today is a Friday (or near it)
-    is_friday = today.weekday() == 4
+    # Whether the report describes a rebalance day is a property of the signal
+    # date, not of the day the report happens to be run. Asking "is today a
+    # Friday" misses the case that matters most: a Friday market holiday, where
+    # today is a Friday but the newest data is Thursday's.
+    signal_day = _signal_date(result, today)
+    is_rebalance_day = signal_day.weekday() == FRIDAY
 
     # Next rebalance date
-    days_until_friday = (4 - today.weekday()) % 7
+    days_until_friday = (FRIDAY - today.weekday()) % 7
     next_friday = today + timedelta(days=days_until_friday if days_until_friday > 0 else 7)
 
     # Render NAV chart
@@ -160,14 +224,20 @@ def generate_weekly_report(
                 }
             )
 
+    trade_log = result.get("trade_log") or []
+    trades = _format_trades(trade_log)
+
     context = {
         "report_date": today.strftime("%Y-%m-%d"),
-        "is_friday": is_friday,
-        "signal_date": result.get("signal_date", today.strftime("%Y-%m-%d")),
+        "is_rebalance_day": is_rebalance_day,
+        "signal_date": signal_day.isoformat(),
         "metrics": _format_metrics(result, portfolio),
         "nav_chart": nav_chart,
         "signals": signals,
         "holdings": holdings_data,
+        "trades": trades,
+        "trade_total": len(trade_log),
+        "trade_shown": len(trades),
         "factor_ic": factor_ic_data or [],
         "updated_at": today.strftime("%Y-%m-%d %H:%M"),
         "next_rebalance": next_friday.strftime("%Y-%m-%d"),
@@ -177,12 +247,17 @@ def generate_weekly_report(
     return template.render(**context)
 
 
-def save_report(html: str, config: AppConfig) -> Path:
-    """Save HTML report to the output directory. Returns the file path."""
+def save_report(html: str, config: AppConfig, today: date | None = None) -> Path:
+    """Save HTML report to the output directory. Returns the file path.
+
+    ``today`` names the file. It is injectable for the same reason
+    ``generate_weekly_report`` takes it: without it the filename is decided by
+    the machine's clock, and no test can pin which file a given run produced.
+    """
     out_dir = Path(config.report.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    today = date.today()
+    today = today or date.today()
     filename = f"weekly_{today.strftime('%Y_%m_%d')}.html"
     path = out_dir / filename
     path.write_text(html, encoding="utf-8")

@@ -1,6 +1,7 @@
 """Unified data access layer over DuckDB."""
 
 import contextlib
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
@@ -9,6 +10,58 @@ import pandas as pd
 from loguru import logger
 
 from quant_trade.data.schema import init_db
+
+TABLE_NAMES: frozenset[str] = frozenset(
+    {
+        "backtest_metric",
+        "backtest_nav",
+        "backtest_position",
+        "backtest_trade",
+        "daily_kline",
+        "factor_values",
+        "financials",
+        "ic_series",
+        "index_weights",
+        "model_feature_importance",
+        "model_ic_series",
+        "model_metric",
+        "simulator_session",
+        "stock_basic",
+        "strategy_signal",
+        "trade_calendar",
+    }
+)
+"""Tables that :meth:`DataStore.table_stats` will introspect. Anything else is rejected."""
+
+TABLE_DATE_COLUMNS: dict[str, str] = {
+    # ``backtest_metric`` (key/value) and ``backtest_position`` (one row per
+    # holding) have no date column of their own, so they have no bounds to
+    # report. Listing them here would send MIN() at a column that is not there.
+    "backtest_nav": "trade_date",
+    "backtest_trade": "trade_date",
+    "daily_kline": "trade_date",
+    "factor_values": "trade_date",
+    "financials": "end_date",
+    "ic_series": "trade_date",
+    "index_weights": "in_date",
+    # ``model_feature_importance`` (one row per factor) and ``model_metric``
+    # (key/value) have no date column, so they have no bounds to report.
+    "model_ic_series": "trade_date",
+    "stock_basic": "list_date",
+    "strategy_signal": "trade_date",
+    "trade_calendar": "trade_date",
+}
+"""Date column per table, used for the earliest/latest bounds. Absent means no bounds."""
+
+
+@dataclass
+class TableStats:
+    """Row count and date span of one table."""
+
+    table: str
+    rows: int
+    earliest: date | None = None
+    latest: date | None = None
 
 
 def _min_list_date(store: "DataStore", as_of: date, min_list_days: int) -> date:
@@ -28,10 +81,38 @@ def _min_list_date(store: "DataStore", as_of: date, min_list_days: int) -> date:
     return as_of
 
 
-class DataStore:
-    """Unified query interface for all market data stored in DuckDB."""
+def _configured_db_path() -> str:
+    """The database the application config names.
 
-    def __init__(self, db_path: str = "data/quant.db"):
+    Resolved with the same rule the app itself uses — ``QUANT_CONFIG``, else the
+    default config file — rather than reimplementing path resolution here.
+    """
+    from quant_trade.config import AppConfig, get_config_path
+
+    return AppConfig.from_yaml(get_config_path()).data.db_path
+
+
+class DataStore:
+    """Unified query interface for all market data stored in DuckDB.
+
+    Prefer passing a path, or better, receiving a store from your caller. The
+    no-argument form exists for scripts and one-off use, and it is *not* a
+    constant: it resolves the configured database, so what it opens depends on
+    the process environment.
+    """
+
+    def __init__(self, db_path: str | None = None) -> None:
+        if db_path is None:
+            db_path = _configured_db_path()
+            # Loud on purpose. The failure this guards against produces wrong
+            # numbers, not an exception, so without a trace in the log there is
+            # nothing to notice — which is how components ended up reading a
+            # different database than their caller's for as long as they did.
+            logger.opt(depth=1).warning(
+                f"DataStore opened without an explicit path; fell back to the configured database "
+                f"{db_path!r}. A component should receive its store from the caller: one that opens "
+                f"its own connection reads a database its caller did not choose."
+            )
         self.db_path = db_path
         self._conn: duckdb.DuckDBPyConnection | None = None
 
@@ -207,6 +288,41 @@ class DataStore:
             return row[0] if row else None
         except Exception:
             return None
+
+    def table_stats(self, table: str) -> TableStats:
+        """Row count and date span of ``table``.
+
+        Raises:
+            ValueError: if ``table`` is not in :data:`TABLE_NAMES`. The name is
+                validated against a fixed allowlist rather than escaped, so an
+                unexpected value can never reach the SQL string.
+        """
+        if table not in TABLE_NAMES:
+            raise ValueError(f"Unknown table {table!r}; expected one of {sorted(TABLE_NAMES)}")
+
+        rows = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        row_count = int(rows[0]) if rows else 0
+
+        date_col = TABLE_DATE_COLUMNS.get(table)
+        if date_col is None or row_count == 0:
+            return TableStats(table=table, rows=row_count)
+
+        bounds = self.conn.execute(f"SELECT MIN({date_col}), MAX({date_col}) FROM {table}").fetchone()
+        if bounds is None:
+            return TableStats(table=table, rows=row_count)
+        return TableStats(table=table, rows=row_count, earliest=bounds[0], latest=bounds[1])
+
+    def all_table_stats(self) -> dict[str, TableStats]:
+        """Stats for every known table, keyed by table name."""
+        return {name: self.table_stats(name) for name in sorted(TABLE_NAMES)}
+
+    def synced_codes(self) -> set[str]:
+        """Codes that have at least one row in ``daily_kline``."""
+        try:
+            df = self.conn.execute("SELECT DISTINCT ts_code FROM daily_kline").df()
+            return set(df["ts_code"].tolist()) if not df.empty else set()
+        except Exception:
+            return set()
 
     def close(self) -> None:
         """Close the database connection, releasing buffer memory first."""

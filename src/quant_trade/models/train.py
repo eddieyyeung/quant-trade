@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any
 
 import lightgbm as lgb
+import numpy as np
+import numpy.typing as npt
 import pandas as pd
 from loguru import logger
 
 from quant_trade.data.store import DataStore
 from quant_trade.models.features import build_feature_matrix
+from quant_trade.services.context import NULL_CONTEXT, RunContext
 
 DEFAULT_PARAMS: dict[str, object] = {
     "objective": "regression",
@@ -38,6 +41,20 @@ class TrainConfig:
     num_boost_round: int = 1000
 
 
+@dataclass
+class WalkForwardResult:
+    """Everything one walk-forward run produced."""
+
+    predictions: pd.DataFrame
+    """DataFrame (ts_code, trade_date, score)."""
+    feature_matrix: pd.DataFrame
+    """The full preprocessed matrix used, kept for evaluation."""
+    feature_importance: pd.DataFrame
+    """Columns: factor, importance (mean across windows), std."""
+    windows_trained: int = 0
+    cancelled: bool = False
+
+
 def walk_forward_train(
     store: DataStore,
     universe: list[str],
@@ -45,12 +62,12 @@ def walk_forward_train(
     end: date,
     factors: list[str] | None = None,
     config: TrainConfig | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ctx: RunContext = NULL_CONTEXT,
+) -> WalkForwardResult:
     """Rolling retrain: train on the past, predict the next window.
 
-    Returns:
-        predictions: DataFrame (ts_code, trade_date, score)
-        feature_matrix: the full preprocessed matrix used (for evaluation)
+    Feature importances are averaged across windows, so callers can see which
+    factors the model actually leaned on without keeping every booster alive.
     """
     cfg = config or TrainConfig()
     # Fetch features from before `start` so the first training window is complete
@@ -58,17 +75,25 @@ def walk_forward_train(
     matrix = build_feature_matrix(store, universe, matrix_start, end, factors=factors)
     if matrix.empty:
         logger.error("walk_forward_train: empty feature matrix")
-        return pd.DataFrame(), matrix
+        return WalkForwardResult(pd.DataFrame(), matrix, _empty_importance())
 
     feature_cols = [c for c in matrix.columns if c not in ("ts_code", "trade_date", "label")]
     calendar = _sorted_dates(matrix)
     signal_dates = _signal_dates(calendar, start, end, cfg.predict_months)
     if not signal_dates:
         logger.error("walk_forward_train: no signal dates in range")
-        return pd.DataFrame(), matrix
+        return WalkForwardResult(pd.DataFrame(), matrix, _empty_importance())
 
     all_preds: list[pd.DataFrame] = []
+    importances: list[npt.NDArray[np.float64]] = []
+    windows_trained = 0
+    total_windows = len(signal_dates)
     for i, sig in enumerate(signal_dates):
+        if ctx.cancelled():
+            ctx.log(f"Training cancelled after {windows_trained}/{total_windows} windows", level="warning")
+            break
+        ctx.progress(i / total_windows, f"Training window {i + 1}/{total_windows} (signal {sig})")
+
         # Training data: strictly before the first signal date, labels
         # must be fully realized inside the training window (no lookahead):
         # a sample at date d has label close[d+2]/close[d+1]-1, so require
@@ -101,6 +126,8 @@ def walk_forward_train(
             eval_y=valid["label"].to_numpy(),
             callbacks=[lgb.early_stopping(cfg.early_stopping, verbose=False)],
         )
+        importances.append(np.asarray(model.feature_importances_, dtype=float))
+        windows_trained += 1
 
         pred_dates = [d for d in calendar if sig <= d < _next_signal(signal_dates, i)]
         for d in pred_dates:
@@ -114,7 +141,31 @@ def walk_forward_train(
             all_preds.append(pd.DataFrame({"ts_code": day["ts_code"], "trade_date": d, "score": scores}))
 
     predictions = pd.concat(all_preds, ignore_index=True) if all_preds else pd.DataFrame()
-    return predictions, matrix
+    return WalkForwardResult(
+        predictions=predictions,
+        feature_matrix=matrix,
+        feature_importance=_aggregate_importance(feature_cols, importances),
+        windows_trained=windows_trained,
+        cancelled=ctx.cancelled(),
+    )
+
+
+def _empty_importance() -> pd.DataFrame:
+    return pd.DataFrame(columns=["factor", "importance", "std"])
+
+
+def _aggregate_importance(feature_cols: list[str], importances: list[npt.NDArray[np.float64]]) -> pd.DataFrame:
+    """Average per-window feature importances into one ranked table."""
+    if not importances:
+        return _empty_importance()
+
+    stacked = np.vstack(importances)
+    std = stacked.std(axis=0) if stacked.shape[0] > 1 else np.zeros(len(feature_cols))
+    return (
+        pd.DataFrame({"factor": feature_cols, "importance": stacked.mean(axis=0), "std": std})
+        .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def save_predictions(predictions: pd.DataFrame, path: str | Path) -> None:
