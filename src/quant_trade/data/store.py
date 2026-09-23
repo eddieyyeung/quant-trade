@@ -204,6 +204,11 @@ class DataStore:
 
         min_list_date = _min_list_date(self, as_of, min_list_days)
         placeholders = ", ".join(["?"] * len(index_codes))
+        # ORDER BY is load-bearing, not cosmetic. DISTINCT returns rows in
+        # whatever order the hash aggregation produced this time, and that order
+        # flows all the way down into factor scoring, where it decides how tied
+        # scores break — so without it the same query picks different stocks on
+        # different calls. Codes are the only column here with a total order.
         sql = f"""
             SELECT DISTINCT iw.ts_code
             FROM index_weights iw
@@ -212,6 +217,7 @@ class DataStore:
               AND iw.in_date <= ?
               AND (iw.out_date IS NULL OR iw.out_date > ?)
               AND (sb.list_date IS NULL OR sb.list_date <= ?)
+            ORDER BY iw.ts_code
         """
         params: list[Any] = list(index_codes) + [as_of, as_of, min_list_date]
         try:
@@ -229,10 +235,16 @@ class DataStore:
             return []
 
     def _universe_from_kline(self, as_of: date, lookback_days: int = 60) -> list[str]:
-        """Derive universe from stocks with kline data in the trailing window."""
+        """Derive universe from stocks with kline data in the trailing window.
+
+        Ordered for the same reason as the index-constituent query above: this
+        fallback serves most historical sessions, so an unstable order here is
+        an unstable order almost everywhere.
+        """
         sql = """
             SELECT DISTINCT ts_code FROM daily_kline
             WHERE trade_date >= ? AND trade_date <= ?
+            ORDER BY ts_code
         """
         try:
             df = self.conn.execute(sql, [as_of - timedelta(days=lookback_days), as_of]).df()

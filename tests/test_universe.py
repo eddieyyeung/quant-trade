@@ -6,6 +6,7 @@ from pathlib import Path
 
 from quant_trade.data.schema import init_db
 from quant_trade.data.store import DataStore
+from quant_trade.strategies.registry import strategy_registry
 
 
 def _build_db(db_path: str) -> DataStore:
@@ -75,3 +76,94 @@ class TestUniverseFallback:
 
             universe = store.get_universe(["000300.SH"], date.today())
             assert universe == []
+
+
+class TestUniverseOrderIsStable:
+    """The returned order decides how tied factor scores break downstream.
+
+    `SELECT DISTINCT` has no defined row order, so without an ORDER BY the same
+    query could return the same codes in a different order each call — and a
+    different order picks different stocks once scores tie.
+    """
+
+    def test_fallback_query_repeats_in_the_same_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _build_db(tmp + "/test.db")
+
+            first = store.get_universe(["000300.SH"], date.today())
+            second = store.get_universe(["000300.SH"], date.today())
+
+            assert first == second
+            assert first == sorted(first), "returns codes in ascending order"
+
+    def test_index_constituent_query_repeats_in_the_same_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _build_db(tmp + "/test.db")
+            for code in ["600519.SH", "600000.SH", "000001.SZ"]:
+                store.conn.execute(
+                    "INSERT INTO index_weights VALUES (?, ?, ?, ?, ?)",
+                    ["000300.SH", code, 0.1, date(2020, 1, 1), None],
+                )
+
+            first = store.get_universe(["000300.SH"], date.today())
+            second = store.get_universe(["000300.SH"], date.today())
+
+            assert first == second
+            assert first == ["000001.SZ", "600000.SH", "600519.SH"]
+
+    def test_excluding_st_keeps_the_remaining_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _build_db(tmp + "/test.db")
+
+            filtered = store.get_universe(["000300.SH"], date.today(), filter_st=True)
+            unfiltered = store.get_universe(["000300.SH"], date.today(), filter_st=False)
+
+            assert "600666.SH" in unfiltered, "the ST name is only gone from the filtered list"
+            assert filtered == [c for c in unfiltered if c != "600666.SH"]
+
+    def test_tied_scores_pick_the_same_names_every_run(self) -> None:
+        """The regression this guards: identical factor inputs → identical picks.
+
+        Every stock here has the same price history, so every factor score ties
+        and the selection is decided purely by the order the universe arrived
+        in. That is exactly the state real data falls into whenever most
+        factors come back empty.
+
+        This covers the consequence end to end; the two tests above cover the
+        contract directly. All three were confirmed to fail with the `ORDER BY`
+        clauses removed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            Path(db_path).unlink(missing_ok=True)
+            conn = init_db(db_path)
+
+            codes = [f"{i:06d}.SZ" for i in range(1, 21)]
+            conn.executemany(
+                "INSERT INTO stock_basic (ts_code, name, industry, market, list_date, is_st) "
+                "VALUES (?, ?, '制造', 'main', ?, FALSE)",
+                [(code, f"股票{i}", date(2015, 1, 1)) for i, code in enumerate(codes)],
+            )
+
+            days = [date.today() - timedelta(days=offset) for offset in range(90, 0, -1)]
+            conn.executemany("INSERT INTO trade_calendar VALUES (?, ?)", [(d, True) for d in days])
+            conn.executemany(
+                "INSERT INTO daily_kline VALUES (?, ?, 10, 11, 9, 10.5, 1000, 10000, 1.0, 2.0)",
+                [(code, d) for code in codes for d in days],
+            )
+            conn.executemany(
+                "INSERT INTO index_weights VALUES (?, ?, ?, ?, ?)",
+                [("000300.SH", code, 0.05, date(2015, 1, 1), None) for code in codes],
+            )
+
+            store = DataStore(db_path)
+            strategy = strategy_registry.get("factor_ranking", store=store)
+
+            def picks() -> list[str]:
+                universe = store.get_universe(["000300.SH"], date.today())
+                return sorted(o.ts_code for o in strategy.generate_signals(date.today(), universe, store).orders)
+
+            first, second = picks(), picks()
+
+            assert first, "the strategy should select something from 20 tied candidates"
+            assert first == second
