@@ -30,6 +30,8 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 后端 SHALL 提供模拟盘会话的创建、列表、详情、状态查询与删除接口。
 
+会话详情返回的快照 SHALL 携带推荐订单与来源策略名，供决策台直接预览采纳，SHALL NOT 要求客户端另行发起一次重算请求。
+
 #### Scenario: 列出会话
 - **WHEN** 客户端 `GET /api/sessions`
 - **THEN** 返回会话数组，日期字段序列化为 ISO 字符串，且不包含 `portfolio_json` 字段
@@ -40,7 +42,12 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 #### Scenario: 会话详情
 - **WHEN** 客户端 `GET /api/sessions/{session_id}`，会话存在
-- **THEN** 返回 `cursor_date`、`week_number`、`portfolio_value`、`previous_decisions` 与 `snapshot`
+- **THEN** 返回 `cursor_date`、`week_number`、`portfolio_value`、`previous_decisions` 与 `snapshot`，且 `snapshot` 含推荐订单与来源策略名
+
+#### Scenario: 初始快照不计算推荐
+
+- **WHEN** 客户端创建一个会话并拿到初始 `snapshot`
+- **THEN** 该快照的推荐订单与策略信号均为无值，与既有「因子和策略信号将在首次调仓时计算」的延迟计算约定一致
 
 #### Scenario: 会话不存在
 - **WHEN** 客户端请求不存在的 `session_id` 的详情或状态
@@ -54,9 +61,19 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 后端 SHALL 提供 `step`（执行调仓）与 `skip`（跳过本周）接口推进模拟盘。
 
+`step` 的订单条目 SHALL 接受可选的 `reason`，并在成交明细中原样带回，使按推荐方案执行的订单在回执里保留来源理由。
+
 #### Scenario: 执行调仓
 - **WHEN** 客户端 `POST /api/sessions/{session_id}/step`，body 含 `orders`（`ts_code`、`target_pct`、`direction`）与可选 `notes`
 - **THEN** 返回 `cursor_advanced`、`next_cursor_date`、组合市值/现金、`executed_orders` 明细与 `warnings`
+
+#### Scenario: 订单带理由
+- **WHEN** `step` 的订单条目含 `reason`
+- **THEN** 对应成交明细的理由为该值
+
+#### Scenario: 订单不带理由
+- **WHEN** `step` 的订单条目不含 `reason`
+- **THEN** 请求照常处理，对应成交明细的理由回落为「用户主动建仓」
 
 #### Scenario: 无效调仓
 - **WHEN** `step` 请求的订单非法（如持仓不足）
@@ -70,11 +87,39 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 后端 SHALL 提供手动盘与参考策略/基准的对比接口。
 
+`weekly_diffs` 的每一条 SHALL 描述该周「用户的目标组合」与「当周推荐的目标组合」之间的偏离，SHALL NOT 依赖影子回测的逐周持仓。目标组合 SHALL 由订单中方向为买入且目标仓位大于 0 的代码集合构成。
+
+每条差异 SHALL 携带一个可空的偏离对象：未配置参考策略（或无策略信号可依据）时该对象为无值，此时 SHALL NOT 报告任何偏离。偏离对象 SHALL 含是否完全跟随、被剔除的代码、被额外加入的代码。
+
+策略影子回测失败时，接口 SHALL 照常返回手动盘与基准序列，并 SHALL 在结果中给出失败原因，SHALL NOT 静默省略策略序列。
+
 #### Scenario: 获取对比报告
+
 - **WHEN** 客户端 `GET /api/sessions/{session_id}/compare`
 - **THEN** 返回 `weeks_completed`、手动/策略/基准净值序列、`metrics`、`weekly_diffs` 与 HTML 报告路径
 
+#### Scenario: 完全跟随推荐
+
+- **WHEN** 某周用户提交的买入目标组合与当周推荐的目标组合一致
+- **THEN** 该周的偏离对象标记为完全跟随，被剔除与被额外加入均为空
+
+#### Scenario: 部分采纳
+
+- **WHEN** 当周推荐 4 只，用户只提交其中 3 只并自行加入 1 只
+- **THEN** 该周被剔除列含未采纳的那 1 只，被额外加入列含自行加入的那 1 只，不完全跟随
+
+#### Scenario: 未配置参考策略
+
+- **WHEN** 某周没有可依据的策略信号
+- **THEN** 该周的偏离对象为无值，SHALL NOT 报告为完全跟随
+
+#### Scenario: 策略回测失败
+
+- **WHEN** 参考策略的影子回测抛出异常
+- **THEN** 接口返回 200，手动盘与基准序列照常存在，结果中含失败原因，策略序列为无值
+
 #### Scenario: 会话不存在
+
 - **WHEN** 对比不存在的会话
 - **THEN** 返回 HTTP 404
 

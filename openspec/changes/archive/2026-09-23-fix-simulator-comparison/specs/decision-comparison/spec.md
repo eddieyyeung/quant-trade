@@ -1,7 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Decision comparison: three-line NAV comparison reports contrasting user manual decisions against the reference strategy and the CSI 300 benchmark, including weekly target-portfolio deviations and drawdown warnings.
-## Requirements
 ### Requirement: Generate three-line comparison
 
 The system SHALL produce a comparison report with three NAV curves: user manual decisions, reference strategy, and benchmark (CSI 300), all normalized to start at 1.0.
@@ -21,15 +19,6 @@ The system SHALL produce a comparison report with three NAV curves: user manual 
 
 - **WHEN** the reference strategy's shadow backtest raises, or the strategy name is not registered
 - **THEN** the report still carries the manual and benchmark series, the strategy series is absent, and the failure reason is reported alongside it
-
-### Requirement: Compute key comparison metrics
-
-The system SHALL compute and compare annual return, Sharpe ratio, max drawdown, win rate, and total return for each line (manual, strategy, benchmark).
-
-#### Scenario: Metrics comparison table
-
-- **WHEN** `compare()` is called
-- **THEN** output includes a structured metrics dict: `{manual: {total_return, annual_return, sharpe_ratio, max_drawdown, win_rate}, strategy: {...}, benchmark: {...}}`
 
 ### Requirement: Show weekly decision differences
 
@@ -75,6 +64,16 @@ The comparison report SHALL flag weeks where portfolio concentration or drawdown
 - **WHEN** the manual portfolio experiences a weekly NAV decline greater than 10%
 - **THEN** that week is annotated with a drawdown warning: "周回撤: {pct}%"
 
+## REMOVED Requirements
+
+### Requirement: Export comparison to HTML report
+
+**Reason**: 这条需求描述了两件已不存在的事。其一，报告并非「复用 `signals/reporter.py` 的 Jinja2 模板」——`comparison.py` 自己拼一段内联 f-string。其二，它带一条 `CLI plain text comparison (no export)` 场景，而平台早已没有命令行入口（`simulator-web` 的 spec 已记录独立启动命令被移除，`pyproject.toml` 也没有 `console_scripts`）。保留原文会让 spec 描述一个无法触发的路径。
+
+**Migration**: 由同一能力下的 `Export comparison report to HTML` 取代——它保留导出契约，去掉 CLI 场景，并把逐周差异表的口径对齐到接口。
+
+## ADDED Requirements
+
 ### Requirement: Export comparison report to HTML
 
 The system SHALL render the comparison report as a standalone HTML file under `reports/`, built in the comparison module itself.
@@ -92,4 +91,3 @@ The system SHALL render the comparison report as a standalone HTML file under `r
 
 - **WHEN** the exported report lists a week in which the user dropped a recommended name
 - **THEN** that name appears in the report's "你剔除" column for that week
-
