@@ -121,7 +121,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/api/sessions/{session_id}/step")
     def step(session_id: str, body: dict[str, Any]) -> Any:
         orders = [
-            OrderRequest(ts_code=o["ts_code"], target_pct=float(o["target_pct"]), direction=o["direction"])
+            OrderRequest(
+                ts_code=o["ts_code"],
+                target_pct=float(o["target_pct"]),
+                direction=o["direction"],
+                reason=o.get("reason", ""),
+            )
             for o in body.get("orders", [])
         ]
         notes = body.get("notes", "")
@@ -140,6 +145,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 {
                     "ts_code": o.ts_code,
                     "direction": o.direction,
+                    "target_pct": o.target_pct,
                     "shares": o.shares,
                     "price": o.price,
                     "reason": o.reason,
@@ -246,5 +252,20 @@ def _serialize_snapshot(snap: Any) -> dict[str, Any]:
         ]
         if snap.strategy_signals is not None
         else None,
+        # Same null-vs-empty rule as the signals above, and for the same reason:
+        # the decision desk shows "no reference strategy" and "a quiet strategy"
+        # as two different states.
+        "recommended_orders": [
+            {
+                "ts_code": o.ts_code,
+                "target_pct": o.target_pct,
+                "direction": o.direction,
+                "reason": o.reason,
+            }
+            for o in (snap.recommended_orders or [])
+        ]
+        if snap.recommended_orders is not None
+        else None,
+        "recommendation_source": snap.recommendation_source,
         "data_warnings": snap.data_warnings,
     }

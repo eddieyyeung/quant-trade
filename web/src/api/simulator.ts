@@ -68,6 +68,14 @@ export interface Snapshot {
    * configured and emitted nothing this week".
    */
   strategy_signals: StrategySignalItem[] | null;
+  /**
+   * `strategy_signals` reshaped into orders the step endpoint accepts, built
+   * server-side so the signal-to-order rules live with the domain. Same
+   * `null` / `[]` distinction as the signals above.
+   */
+  recommended_orders: OrderRequest[] | null;
+  /** Which strategy the recommendation came from, for labelling the adoption. */
+  recommendation_source: string | null;
   data_warnings: string[];
 }
 
@@ -166,6 +174,12 @@ export interface OrderRequest {
   ts_code: string;
   target_pct: number;
   direction: 'BUY' | 'SELL';
+  /**
+   * Why the order exists. Optional — the backend falls back to a generic
+   * reason — but a recommended order carries the strategy's own rationale, and
+   * it is what makes the fill receipt readable.
+   */
+  reason?: string;
 }
 
 export interface CreateSessionParams {

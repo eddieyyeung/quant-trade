@@ -136,6 +136,46 @@ class TestSimulatorEngine:
             assert step_result.decision is not None
             assert step_result.decision.notes == "测试买入茅台"
 
+    def test_buy_order_carries_its_reason_to_the_fill(self) -> None:
+        """A recommendation's stated reason survives into the executed order.
+
+        The engine used to read ``order.reason`` behind a ``hasattr`` guard,
+        but ``OrderRequest`` had no such field — so every fill was recorded as
+        a discretionary one and the strategy's own rationale was dropped.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_engine_db(db_path)
+            sim = Simulator(store=store, db_path=db_path, data_dir=tmp)
+
+            create_result = sim.create(name="理由透传测试", start_date=BASE_START)
+            sid = create_result["session_id"]
+
+            orders = [
+                OrderRequest(ts_code="600519.SH", target_pct=0.2, direction="BUY", reason="综合得分 2.31"),
+            ]
+            step_result = sim.step(sid, orders)
+
+            buys = [o for o in step_result.decision.executed_orders if o.direction == "BUY"]
+            assert buys, "expected the buy order to fill"
+            assert buys[0].reason == "综合得分 2.31"
+
+    def test_buy_order_without_reason_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_engine_db(db_path)
+            sim = Simulator(store=store, db_path=db_path, data_dir=tmp)
+
+            create_result = sim.create(name="无理由回退测试", start_date=BASE_START)
+            sid = create_result["session_id"]
+
+            orders = [OrderRequest(ts_code="600519.SH", target_pct=0.2, direction="BUY")]
+            step_result = sim.step(sid, orders)
+
+            buys = [o for o in step_result.decision.executed_orders if o.direction == "BUY"]
+            assert buys, "expected the buy order to fill"
+            assert buys[0].reason == "用户主动建仓"
+
     def test_status_returns_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = tmp + "/test.db"

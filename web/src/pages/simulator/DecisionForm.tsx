@@ -1,8 +1,10 @@
 import { useState } from 'react';
-import { App as AntdApp, Button, Flex, Form, Input, Typography } from 'antd';
+import { App as AntdApp, Button, Flex, Form, Input, Tooltip, Typography } from 'antd';
 
 import { simulatorApi, type OrderRequest } from '../../api/simulator';
 import { parseOrders } from './orders';
+import RecommendationModal from './RecommendationModal';
+import { toFormInputs } from './recommendation';
 
 interface FormValues {
   buy?: string;
@@ -12,14 +14,27 @@ interface FormValues {
 
 export default function DecisionForm({
   sessionId,
+  recommendedOrders,
+  recommendationSource,
   onExecuted,
 }: {
   sessionId: string;
+  /**
+   * `null` means the session has no reference strategy. `[]` means it has one
+   * that was quiet this week — the entry point is still shown, disabled, so the
+   * path is visible rather than silently absent.
+   */
+  recommendedOrders: OrderRequest[] | null;
+  recommendationSource: string | null;
   onExecuted: () => void;
 }) {
   const { message, modal, notification } = AntdApp.useApp();
   const [form] = Form.useForm<FormValues>();
   const [submitting, setSubmitting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+
+  /** Labels an adoption in the notes, so the record says where the week came from. */
+  const followNotes = recommendationSource ? `按 ${recommendationSource} 推荐方案` : '按推荐方案';
 
   const execute = async (orders: OrderRequest[], notes: string) => {
     setSubmitting(true);
@@ -30,7 +45,11 @@ export default function DecisionForm({
       // `message` is a single line and collapses every line onto one, so the
       // receipt goes through `notification`, which keeps the shape.
       const fills = result.executed_orders.map(
-        order => `${order.direction} ${order.ts_code} ${order.shares}股 @ ¥${order.price}`,
+        order =>
+          `${order.direction} ${order.ts_code} ${order.shares}股 @ ¥${order.price}` +
+          // Recommended orders carry the strategy's rationale; showing it is
+          // the point of carrying it, but a hand-typed order has none.
+          (order.reason ? ` · ${order.reason}` : ''),
       );
       notification.info({
         message: `成交 ${result.executed_orders.length} 笔`,
@@ -76,6 +95,23 @@ export default function DecisionForm({
     await execute(orders, notes);
   };
 
+  /** Submit the recommendation as-is. Weights are never recomputed here. */
+  const executeRecommendation = async () => {
+    setPreviewing(false);
+    await execute(recommendedOrders ?? [], followNotes);
+  };
+
+  /**
+   * Hand the orders to the form as editable text rather than submitting them.
+   * Partial adoption is the interesting case, so it has to be as cheap as
+   * adoption in full.
+   */
+  const prefillFromRecommendation = () => {
+    const { buy, sell } = toFormInputs(recommendedOrders ?? []);
+    form.setFieldsValue({ buy, sell, notes: `${followNotes}（已手工调整）` });
+    setPreviewing(false);
+  };
+
   const handleSkip = () => {
     modal.confirm({
       title: '跳过本周',
@@ -119,10 +155,35 @@ export default function DecisionForm({
         <Button type="primary" htmlType="submit" loading={submitting}>
           提交决策
         </Button>
+        {/* No reference strategy means no recommendation, and the "无参考策略"
+            notice above already says why — an entry point here would only
+            restate it. */}
+        {recommendedOrders !== null && (
+          // A disabled button fires no pointer events, so the hover target has
+          // to be this wrapper — tooltips on the button itself never open, and
+          // the quiet-week case exists precisely to explain itself.
+          <Tooltip title={recommendedOrders.length === 0 ? '参考策略本周没有给出信号' : undefined}>
+            <span style={{ display: 'inline-block' }}>
+              <Button onClick={() => setPreviewing(true)} disabled={submitting || recommendedOrders.length === 0}>
+                按推荐方案
+              </Button>
+            </span>
+          </Tooltip>
+        )}
         <Button onClick={handleSkip} disabled={submitting}>
           跳过本周
         </Button>
       </Flex>
+
+      <RecommendationModal
+        open={previewing}
+        orders={recommendedOrders ?? []}
+        source={recommendationSource}
+        submitting={submitting}
+        onExecute={() => void executeRecommendation()}
+        onPrefill={prefillFromRecommendation}
+        onClose={() => setPreviewing(false)}
+      />
     </Form>
   );
 }

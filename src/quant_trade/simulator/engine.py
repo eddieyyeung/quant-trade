@@ -381,7 +381,7 @@ class Simulator:
                             shares=shares,
                             price=price,
                             cost_or_proceeds=round(cost, 2),
-                            reason=order.reason if hasattr(order, "reason") and order.reason else "用户主动建仓",
+                            reason=order.reason or "用户主动建仓",
                         )
                     )
                 elif buy_amount > 0:

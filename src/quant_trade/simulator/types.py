@@ -12,6 +12,7 @@ class OrderRequest:
     ts_code: str
     target_pct: float  # 0.0 = sell all, >0 = buy to this weight
     direction: str = "BUY"  # BUY or SELL
+    reason: str = ""  # why this order exists — carried through to the fill
 
 
 @dataclass
@@ -85,6 +86,11 @@ class Snapshot:
     cash: float
     factor_ranking: list[FactorRankItem]
     strategy_signals: list[StrategySignalItem] | None
+    # The same recommendation as `strategy_signals`, already shaped as the
+    # orders the decision endpoint takes. None and [] carry the same meaning as
+    # they do for the signals: no reference strategy, versus one that was quiet.
+    recommended_orders: list[OrderRequest] | None = None
+    recommendation_source: str | None = None
     data_warnings: list[str] = field(default_factory=list)
 
 

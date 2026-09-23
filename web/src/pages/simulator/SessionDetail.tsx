@@ -192,7 +192,12 @@ export default function SessionDetail() {
           </Card>
 
           <Card size="small" title="本周决策">
-            <DecisionForm sessionId={detail.session_id} onExecuted={() => void load()} />
+            <DecisionForm
+              sessionId={detail.session_id}
+              recommendedOrders={snapshot.recommended_orders}
+              recommendationSource={snapshot.recommendation_source}
+              onExecuted={() => void load()}
+            />
           </Card>
         </>
       )}

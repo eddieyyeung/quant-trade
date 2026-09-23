@@ -13,6 +13,7 @@ from quant_trade.data.schema import init_db
 from quant_trade.data.store import DataStore
 from quant_trade.data.sync import sync_index_daily
 from quant_trade.simulator.snapshot import SnapshotBuilder
+from quant_trade.strategies.base import Order, SignalResult, Strategy
 
 
 def _build_minimal_db(db_path: str) -> DataStore:
@@ -172,6 +173,109 @@ class TestSnapshot:
                 universe=[],
             )
             assert snapshot.strategy_signals is None
+
+
+class _FixedStrategy(Strategy):
+    """A reference strategy that returns whatever it was handed.
+
+    Stands in for a real strategy so the recommendation mapping can be checked
+    without paying for a full factor pass on every assertion.
+    """
+
+    name = "stub"
+
+    def __init__(self, orders: list[Order]) -> None:
+        super().__init__(store=None)
+        self._orders = orders
+
+    def generate_signals(self, date: date, universe: list[str], data: object) -> SignalResult:
+        return SignalResult(orders=list(self._orders))
+
+
+class TestRecommendedOrders:
+    """The recommendation rides along in the snapshot, shaped as decision orders.
+
+    Building it here rather than recomputing on click keeps the reference
+    strategy at one full factor pass per snapshot instead of two.
+    """
+
+    def test_none_when_no_reference_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_minimal_db(db_path)
+
+            builder = SnapshotBuilder(store, Portfolio(cash=100000), reference_strategy=None)
+            snapshot = builder.build_snapshot(
+                cursor_date=date.today(),
+                exec_date=date.today(),
+                week_number=1,
+                total_weeks=10,
+                universe=[],
+            )
+
+            assert snapshot.recommended_orders is None
+            assert snapshot.recommendation_source is None
+
+    def test_empty_list_when_strategy_is_quiet(self) -> None:
+        """No signals is not the same fact as no strategy, and stays distinct."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_minimal_db(db_path)
+
+            builder = SnapshotBuilder(store, Portfolio(cash=100000), reference_strategy=_FixedStrategy([]))
+            snapshot = builder.build_snapshot(
+                cursor_date=date.today(),
+                exec_date=date.today(),
+                week_number=1,
+                total_weeks=10,
+                universe=[],
+            )
+
+            assert snapshot.recommended_orders == []
+            assert snapshot.recommendation_source == "stub"
+
+    def test_maps_signals_keeps_weights_and_puts_buys_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_minimal_db(db_path)
+
+            portfolio = Portfolio(cash=50000)
+            portfolio.buy(code="000858.SZ", price=50.0, amount=50000, trade_date=date.today() - timedelta(days=3))
+
+            strategy = _FixedStrategy(
+                [
+                    Order(ts_code="600519.SH", target_pct=0.0667, direction="BUY", reason="综合得分 2.31"),
+                    # Explicitly a sell, and listed first, so the ordering below
+                    # is the mapping's doing rather than the input's.
+                    Order(ts_code="601318.SH", target_pct=0.0, direction="SELL", reason="策略清仓"),
+                ]
+            )
+            builder = SnapshotBuilder(store, portfolio, reference_strategy=strategy)
+            snapshot = builder.build_snapshot(
+                cursor_date=date.today(),
+                exec_date=date.today(),
+                week_number=1,
+                total_weeks=10,
+                universe=[],
+            )
+
+            orders = snapshot.recommended_orders
+            assert orders is not None
+            assert snapshot.recommendation_source == "stub"
+
+            assert [o.direction for o in orders] == ["BUY", "SELL", "SELL"]
+            assert [o.ts_code for o in orders] == ["600519.SH", "601318.SH", "000858.SZ"]
+
+            bought = orders[0]
+            assert bought.target_pct == 0.0667, "target weight must pass through unchanged"
+            assert bought.reason == "综合得分 2.31"
+
+            # 000858.SZ is held but absent from the target list, so the snapshot
+            # appends a sell for it — that entry has to survive the mapping.
+            dropped = orders[-1]
+            assert dropped.ts_code == "000858.SZ"
+            assert dropped.target_pct == 0.0
+            assert dropped.reason == "跌出策略目标组合"
 
 
 class _StubIndexAdapter:
