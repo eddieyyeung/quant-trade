@@ -175,13 +175,21 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "nav_strategy": result.nav_strategy,
             "nav_benchmark": result.nav_benchmark,
             "metrics": result.metrics,
+            "strategy_error": result.strategy_error,
             "weekly_diffs": [
                 {
                     "week_number": d.week_number,
                     "cursor_date": str(d.cursor_date),
-                    "user_only": d.user_only,
-                    "strategy_only": d.strategy_only,
-                    "common": d.common,
+                    # None and an empty deviation say different things — "no
+                    # recommendation this week" versus "followed it exactly".
+                    "deviation": None
+                    if d.deviation is None
+                    else {
+                        "followed": d.deviation.followed,
+                        "dropped": d.deviation.dropped,
+                        "added": d.deviation.added,
+                    },
+                    "concentration_warning": d.concentration_warning,
                     "drawdown_warning": d.drawdown_warning,
                 }
                 for d in result.weekly_diffs

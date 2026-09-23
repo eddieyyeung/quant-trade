@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { App as AntdApp, Alert, Button, Card, Col, Flex, Row, Table, Typography } from 'antd';
+import { App as AntdApp, Alert, Button, Card, Col, Flex, Row, Table, Tag, Typography } from 'antd';
 import type { TableProps } from 'antd';
 import type { EChartsOption } from 'echarts';
 
@@ -75,28 +75,38 @@ function navOption(data: ComparisonResult): EChartsOption {
   };
 }
 
+/** A `string[]` cell. Empty is shown, not left blank — an empty cell reads as missing data. */
+function codeList(codes: string[]): string {
+  return codes.join('、') || '—';
+}
+
 const diffColumns: TableProps<WeeklyDiff>['columns'] = [
   { title: '周', dataIndex: 'week_number', key: 'week_number', width: 70 },
   { title: '日期', dataIndex: 'cursor_date', key: 'cursor_date', width: 120 },
   {
-    title: '你独有',
-    dataIndex: 'user_only',
-    key: 'user_only',
-    render: (codes: string[]) => codes.join('、') || '—',
+    title: '采纳',
+    key: 'followed',
+    width: 110,
+    render: (_value, row) => {
+      if (row.deviation === null) return <Typography.Text type="secondary">无参考策略</Typography.Text>;
+      return row.deviation.followed ? <Tag color="success">完全跟随</Tag> : <Tag color="warning">有偏离</Tag>;
+    },
   },
   {
-    title: '策略独有',
-    dataIndex: 'strategy_only',
-    key: 'strategy_only',
-    render: (codes: string[]) => codes.join('、') || '—',
+    title: '你剔除',
+    key: 'dropped',
+    render: (_value, row) => (row.deviation === null ? '—' : codeList(row.deviation.dropped)),
   },
-  { title: '共同', dataIndex: 'common', key: 'common', render: (codes: string[]) => codes.join('、') || '—' },
+  {
+    title: '你额外加',
+    key: 'added',
+    render: (_value, row) => (row.deviation === null ? '—' : codeList(row.deviation.added)),
+  },
   {
     title: '警告',
-    dataIndex: 'drawdown_warning',
-    key: 'drawdown_warning',
-    width: 180,
-    render: (warning: string | null) => warning ?? '—',
+    key: 'warning',
+    width: 200,
+    render: (_value, row) => row.drawdown_warning ?? row.concentration_warning ?? '—',
   },
 ];
 
@@ -152,6 +162,12 @@ export default function ComparisonView({ sessionId }: { sessionId: string }) {
   return (
     <Flex vertical gap={16}>
       <Card size="small" title={`净值曲线（已完成 ${data.weeks_completed} 周）`}>
+        {/* A missing strategy line has to say why. Rendering two curves and
+            nothing else is how the date-type bug stayed invisible: the page
+            looked like "no strategy configured" either way. */}
+        {data.strategy_error !== null && (
+          <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="策略净值线不可用" description={data.strategy_error} />
+        )}
         {hasCurves ? (
           <EChart option={navOption(data)} height={360} aria-label="手动、参考策略与基准的净值曲线" />
         ) : (
@@ -184,7 +200,15 @@ export default function ComparisonView({ sessionId }: { sessionId: string }) {
         </Row>
       </Card>
 
-      <Card size="small" title="逐周决策差异">
+      <Card
+        size="small"
+        title="逐周决策差异"
+        extra={
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            比较的是当周的目标组合（想买什么），不是期末持仓
+          </Typography.Text>
+        }
+      >
         {data.weekly_diffs.length > 0 ? (
           <Table<WeeklyDiff>
             rowKey="week_number"

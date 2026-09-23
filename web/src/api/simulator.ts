@@ -113,12 +113,31 @@ export interface SkipResult {
   portfolio_total_value: number;
 }
 
+/**
+ * How a week's decision lined up with the recommendation for it.
+ *
+ * The two *target portfolios* are compared, not the orders and not the
+ * resulting holdings: the same portfolio can be reached by different orders,
+ * and an order-level comparison would call "bought it in two lots" a deviation.
+ */
+export interface WeeklyDeviation {
+  followed: boolean;
+  /** Recommended, and not taken. */
+  dropped: string[];
+  /** Taken, and not recommended. */
+  added: string[];
+}
+
 export interface WeeklyDiff {
   week_number: number;
   cursor_date: string;
-  user_only: string[];
-  strategy_only: string[];
-  common: string[];
+  /**
+   * `null` is "there was no recommendation this week" — no reference strategy,
+   * or one that produced no signals. That is not the same as following it, so
+   * it must not be rendered as a match.
+   */
+  deviation: WeeklyDeviation | null;
+  concentration_warning: string | null;
   drawdown_warning: string | null;
 }
 
@@ -138,6 +157,8 @@ export interface ComparisonResult {
   nav_benchmark: { trade_date: string; nav: number }[] | null;
   metrics: Record<string, ComparisonMetrics>;
   weekly_diffs: WeeklyDiff[];
+  /** Why the strategy line is missing, when it is. Shown, never swallowed. */
+  strategy_error: string | null;
   html_path: string | null;
 }
 
