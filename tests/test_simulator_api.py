@@ -152,6 +152,82 @@ class TestWeekAdvance:
         resp = client.post("/api/sessions/nope/step", json={"orders": []})
         assert resp.status_code == 400
 
+    def test_order_reason_survives_the_round_trip(self, client) -> None:
+        """A submitted `reason` comes back on the fill, not the generic fallback."""
+        sid = _create_session(client, start_date=str(BASE_START))["session_id"]
+        result = client.post(
+            f"/api/sessions/{sid}/step",
+            json={
+                "orders": [
+                    {
+                        "ts_code": "600519.SH",
+                        "target_pct": 0.2,
+                        "direction": "BUY",
+                        "reason": "综合得分 2.31",
+                    }
+                ],
+                "notes": "理由透传",
+            },
+        ).json()
+
+        assert result["executed_orders"], "expected the buy to fill"
+        assert result["executed_orders"][0]["reason"] == "综合得分 2.31"
+
+    def test_order_without_reason_gets_the_generic_one(self, client) -> None:
+        """The fallback, over HTTP — the engine test covers the other half."""
+        sid = _create_session(client, start_date=str(BASE_START))["session_id"]
+        result = client.post(
+            f"/api/sessions/{sid}/step",
+            json={"orders": [{"ts_code": "600519.SH", "target_pct": 0.2, "direction": "BUY"}]},
+        ).json()
+
+        assert result["executed_orders"], "expected the buy to fill"
+        assert result["executed_orders"][0]["reason"] == "用户主动建仓"
+
+
+class TestRecommendation:
+    """The recommendation reaches the client as submit-ready orders."""
+
+    def test_deferred_in_the_initial_snapshot(self, client) -> None:
+        """Session creation stays lightweight — same deferral the signals get."""
+        snap = _create_session(client, start_date=str(BASE_START), ref="factor_ranking")["snapshot"]
+        assert snap["recommended_orders"] is None
+        assert snap["recommendation_source"] is None
+
+    def test_none_without_a_reference_strategy(self, client) -> None:
+        sid = _create_session(client, start_date=str(BASE_START))["session_id"]
+        snap = client.get(f"/api/sessions/{sid}").json()["snapshot"]
+        assert snap["recommended_orders"] is None
+        assert snap["recommendation_source"] is None
+
+    def test_session_detail_serves_orders_matching_the_signals(self, client) -> None:
+        sid = _create_session(client, start_date=str(BASE_START), ref="factor_ranking")["session_id"]
+        snap = client.get(f"/api/sessions/{sid}").json()["snapshot"]
+
+        assert snap["recommendation_source"] == "factor_ranking"
+        orders = snap["recommended_orders"]
+        assert orders is not None
+
+        # One order per signal, same names, weights and rationale — the mapping
+        # reshapes, it does not re-decide.
+        signals = snap["strategy_signals"]
+        assert [(o["ts_code"], o["reason"]) for o in orders] == [(s["ts_code"], s["reason"]) for s in signals]
+
+        directions = [o["direction"] for o in orders]
+        assert directions == sorted(directions, key=lambda d: 0 if d == "BUY" else 1), "buys come first"
+
+    def test_recommended_orders_are_accepted_by_step(self, client) -> None:
+        """The whole point: what the snapshot hands over is directly submittable."""
+        sid = _create_session(client, start_date=str(BASE_START), ref="factor_ranking")["session_id"]
+        orders = client.get(f"/api/sessions/{sid}").json()["snapshot"]["recommended_orders"]
+        assert orders, "seeded db should yield signals from the factor ranking strategy"
+
+        result = client.post(f"/api/sessions/{sid}/step", json={"orders": orders, "notes": "按推荐方案"}).json()
+
+        assert result["executed_orders"], "expected fills"
+        reasons = {f["reason"] for f in result["executed_orders"]}
+        assert reasons - {"用户主动建仓"}, "fills should carry the strategy's rationale"
+
     def test_skip_invalid_session_400(self, client) -> None:
         resp = client.post("/api/sessions/nope/skip")
         assert resp.status_code == 400
@@ -169,22 +245,6 @@ class TestCompare:
         assert client.get("/api/sessions/nope/compare").status_code == 404
 
 
-class TestCliWebPort:
-    def test_extract_port_flag(self) -> None:
-        from quant_trade.cli import _extract_arg
-
-        assert _extract_arg(["web", "--port", "9000"], "--port", "9555") == "9000"
-        assert _extract_arg(["web", "--port=9000"], "--port", "9555") == "9000"
-
-    def test_default_port_is_9555(self) -> None:
-        import inspect
-
-        import quant_trade.cli as cli
-
-        src = inspect.getsource(cli._cmd_sim)
-        assert '_extract_arg(extra, "--port", "9555")' in src
-
-
 class TestFrontendContract:
     """Frontend dev wiring per simulator-web spec (no JS test infra — assert source contract)."""
 
@@ -195,5 +255,5 @@ class TestFrontendContract:
         assert "'/api'" in cfg
 
     def test_api_base_env_override(self) -> None:
-        src = (Path(__file__).parents[1] / "web" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
+        src = (Path(__file__).parents[1] / "web" / "src" / "api" / "http.ts").read_text(encoding="utf-8")
         assert "import.meta.env.VITE_API_BASE || '/api'" in src

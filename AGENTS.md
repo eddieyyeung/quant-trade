@@ -6,11 +6,17 @@ Contributor guide for **quant-trade**, a Python 3.13 quantitative trading resear
 
 Source uses the `src` layout, with the package in `src/quant_trade/`:
 
+- `services/` — **the single entry point for every research operation**; a params object plus a `RunContext` in, a structured result out
+- `runtime/` — FastAPI app assembly; `__main__.py` starts the platform
 - `data/` — market data ingestion (akshare/tushare adapters, DuckDB storage, trade calendar)
 - `factors/` — factor computation (momentum/value/quality), preprocessing, IC analysis
 - `strategies/` — strategy engine and signal generation
 - `backtest/` — A-share backtest engine (T+1, price limits, fees, suspensions)
 - `signals/` — weekly HTML report generation
+
+There is no command-line interface. Research operations live in `services/` and are
+invoked by the web UI or by scripts; the only CLI-shaped entry point is
+`python -m quant_trade`, which starts the server and takes no subcommands.
 
 Supporting locations: `config/default.yaml` holds runtime configuration, `tests/` holds the pytest suite, and `data/` + `reports/` are generated outputs (gitignored).
 
@@ -20,8 +26,9 @@ Everything runs through `uv`:
 
 ```bash
 uv sync --extra dev                        # install dependencies, including dev tools
-uv run quant-trade weekly                  # full pipeline: sync data → factors → strategy → HTML report
-uv run quant-trade backtest run --start 2020-01-01   # run a backtest over a date range
+uv run python -m quant_trade               # start the platform on http://127.0.0.1:9555
+uv run python -m quant_trade --reload      # dev: auto-restart on code change
+(cd web && npm install && npm run build)   # build the frontend into web/dist
 uv run pytest                              # run tests with coverage
 uv run ruff check && uv run ruff format    # lint and auto-format
 uv run mypy src                            # strict type-check
@@ -38,7 +45,7 @@ uv run mypy src                            # strict type-check
 
 - pytest with pytest-cov; coverage is configured in `pyproject.toml` (`--cov=quant_trade`).
 - Write one test file per module or area; name test functions `test_*` and add a short docstring.
-- Run a single file with `uv run pytest tests/test_cli.py` or filter with `-k`.
+- Run a single file with `uv run pytest tests/test_services_data.py` or filter with `-k`.
 
 ## Commit & Pull Request Guidelines
 

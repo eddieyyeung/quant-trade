@@ -1,28 +1,36 @@
 ## Purpose
 
 Simulator web: FastAPI web service for the interactive simulator — session CRUD, weekly step/skip decisions, comparison reports, development CORS, and frontend API conventions (backend on port 9555, Vite dev proxy on 9333, `/api` relative base).
-
 ## Requirements
-
 ### Requirement: Web 服务启动与端口约定
 
-模拟盘 Web 服务 SHALL 通过 `quant-trade sim web` 命令启动，默认监听端口 9555，主机默认 `0.0.0.0`。前端 Vite dev server SHALL 监听 9333，并将 `/api` 请求代理转发至 `http://localhost:9555`。
+模拟盘 API SHALL 由研究平台进程托管，通过 `python -m quant_trade` 启动，默认监听端口 9555，主机默认 `127.0.0.1`（仅回环）。前端 Vite dev server SHALL 监听 9333，并将 `/api` 请求代理转发至 `http://localhost:9555`。系统 SHALL NOT 提供独立的模拟盘启动命令。
 
 #### Scenario: 默认端口启动后端
-- **WHEN** 用户执行 `uv run quant-trade sim web`
-- **THEN** FastAPI 服务在 `http://localhost:9555` 启动，无需显式指定端口
+
+- **WHEN** 用户执行 `uv run python -m quant_trade`
+- **THEN** 研究平台在 `http://localhost:9555` 启动，模拟盘 API 随之可用，无需显式指定端口
 
 #### Scenario: 自定义端口
-- **WHEN** 用户执行 `uv run quant-trade sim web --port 9000`
+
+- **WHEN** 用户执行 `uv run python -m quant_trade --port 9000`
 - **THEN** 服务监听 9000，且用户须同步修改 `web/vite.config.ts` 代理目标才能与前端联调
 
 #### Scenario: 前端开发代理
+
 - **WHEN** 前端 dev server（9333）收到 `/api` 开头的请求
 - **THEN** 请求被转发到 `http://localhost:9555`，`changeOrigin` 生效
+
+#### Scenario: 独立启动命令已移除
+
+- **WHEN** 用户执行 `uv run quant-trade sim web`
+- **THEN** 命令不存在，进程以非零状态码退出
 
 ### Requirement: 会话 CRUD API
 
 后端 SHALL 提供模拟盘会话的创建、列表、详情、状态查询与删除接口。
+
+会话详情返回的快照 SHALL 携带推荐订单与来源策略名，供决策台直接预览采纳，SHALL NOT 要求客户端另行发起一次重算请求。
 
 #### Scenario: 列出会话
 - **WHEN** 客户端 `GET /api/sessions`
@@ -34,7 +42,12 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 #### Scenario: 会话详情
 - **WHEN** 客户端 `GET /api/sessions/{session_id}`，会话存在
-- **THEN** 返回 `cursor_date`、`week_number`、`portfolio_value`、`previous_decisions` 与 `snapshot`
+- **THEN** 返回 `cursor_date`、`week_number`、`portfolio_value`、`previous_decisions` 与 `snapshot`，且 `snapshot` 含推荐订单与来源策略名
+
+#### Scenario: 初始快照不计算推荐
+
+- **WHEN** 客户端创建一个会话并拿到初始 `snapshot`
+- **THEN** 该快照的推荐订单与策略信号均为无值，与既有「因子和策略信号将在首次调仓时计算」的延迟计算约定一致
 
 #### Scenario: 会话不存在
 - **WHEN** 客户端请求不存在的 `session_id` 的详情或状态
@@ -48,9 +61,19 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 后端 SHALL 提供 `step`（执行调仓）与 `skip`（跳过本周）接口推进模拟盘。
 
+`step` 的订单条目 SHALL 接受可选的 `reason`，并在成交明细中原样带回，使按推荐方案执行的订单在回执里保留来源理由。
+
 #### Scenario: 执行调仓
 - **WHEN** 客户端 `POST /api/sessions/{session_id}/step`，body 含 `orders`（`ts_code`、`target_pct`、`direction`）与可选 `notes`
 - **THEN** 返回 `cursor_advanced`、`next_cursor_date`、组合市值/现金、`executed_orders` 明细与 `warnings`
+
+#### Scenario: 订单带理由
+- **WHEN** `step` 的订单条目含 `reason`
+- **THEN** 对应成交明细的理由为该值
+
+#### Scenario: 订单不带理由
+- **WHEN** `step` 的订单条目不含 `reason`
+- **THEN** 请求照常处理，对应成交明细的理由回落为「用户主动建仓」
 
 #### Scenario: 无效调仓
 - **WHEN** `step` 请求的订单非法（如持仓不足）
@@ -64,11 +87,39 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 后端 SHALL 提供手动盘与参考策略/基准的对比接口。
 
+`weekly_diffs` 的每一条 SHALL 描述该周「用户的目标组合」与「当周推荐的目标组合」之间的偏离，SHALL NOT 依赖影子回测的逐周持仓。目标组合 SHALL 由订单中方向为买入且目标仓位大于 0 的代码集合构成。
+
+每条差异 SHALL 携带一个可空的偏离对象：未配置参考策略（或无策略信号可依据）时该对象为无值，此时 SHALL NOT 报告任何偏离。偏离对象 SHALL 含是否完全跟随、被剔除的代码、被额外加入的代码。
+
+策略影子回测失败时，接口 SHALL 照常返回手动盘与基准序列，并 SHALL 在结果中给出失败原因，SHALL NOT 静默省略策略序列。
+
 #### Scenario: 获取对比报告
+
 - **WHEN** 客户端 `GET /api/sessions/{session_id}/compare`
 - **THEN** 返回 `weeks_completed`、手动/策略/基准净值序列、`metrics`、`weekly_diffs` 与 HTML 报告路径
 
+#### Scenario: 完全跟随推荐
+
+- **WHEN** 某周用户提交的买入目标组合与当周推荐的目标组合一致
+- **THEN** 该周的偏离对象标记为完全跟随，被剔除与被额外加入均为空
+
+#### Scenario: 部分采纳
+
+- **WHEN** 当周推荐 4 只，用户只提交其中 3 只并自行加入 1 只
+- **THEN** 该周被剔除列含未采纳的那 1 只，被额外加入列含自行加入的那 1 只，不完全跟随
+
+#### Scenario: 未配置参考策略
+
+- **WHEN** 某周没有可依据的策略信号
+- **THEN** 该周的偏离对象为无值，SHALL NOT 报告为完全跟随
+
+#### Scenario: 策略回测失败
+
+- **WHEN** 参考策略的影子回测抛出异常
+- **THEN** 接口返回 200，手动盘与基准序列照常存在，结果中含失败原因，策略序列为无值
+
 #### Scenario: 会话不存在
+
 - **WHEN** 对比不存在的会话
 - **THEN** 返回 HTTP 404
 
@@ -84,6 +135,8 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 
 前端 SHALL 默认使用相对路径 `/api` 作为 API 基址，并可通过 `VITE_API_BASE` 环境变量覆盖（用于连接部署后的后端）。
 
+基址解析 SHALL 由平台共享的请求模块承担，仿真客户端 SHALL 建立在其之上，SHALL NOT 自带第二套基址解析与错误归一化。仿真客户端 SHALL NOT 依赖已被删除的独立模拟盘前端模块。
+
 #### Scenario: 默认基址
 - **WHEN** 未设置 `VITE_API_BASE`
 - **THEN** 所有 API 请求发往 `/api` 相对路径，经 Vite 代理到达后端
@@ -91,3 +144,41 @@ Simulator web: FastAPI web service for the interactive simulator — session CRU
 #### Scenario: 自定义基址
 - **WHEN** 构建时设置 `VITE_API_BASE=https://api.example.com`
 - **THEN** 所有 API 请求发往该绝对地址
+
+#### Scenario: 仿真客户端复用平台请求模块
+- **WHEN** 检查仿真前端发起请求的路径
+- **THEN** 基址解析与错误归一化来自平台共享的请求模块，仿真客户端只声明路径与响应类型
+
+### Requirement: 仿真分区并入平台外壳
+
+仿真前端 SHALL 作为研究平台的一个分区存在，通过侧边栏「仿真」进入 `/simulator`，SHALL NOT 再作为独立应用运行。`/simulator` 入口 SHALL 不再指向占位页。
+
+分区内 SHALL 由列表行进入单个会话的决策台，SHALL NOT 为详情页声明顶部标签——详情页的 `activeKey` 匹配不到任何标签，标签栏会空白。
+
+页面样式 SHALL 使用 antd 组件与主题 token，SHALL NOT 新增手写样式表。图表 SHALL 使用按需注册的共享 ECharts 封装，SHALL NOT 引入其他图表库。
+
+#### Scenario: 分区入口不再是占位页
+
+- **WHEN** 用户点击侧边栏「仿真」
+- **THEN** 进入会话创建与列表页面，而非「该分区由后续变更提供」的占位内容
+
+#### Scenario: 刷新不 404
+
+- **WHEN** 用户直接刷新 `/simulator` 或处于某个会话的决策台时刷新
+- **THEN** 后端 SPA 回退返回页面外壳，路由正常渲染，请求不打到回退处理之外
+
+#### Scenario: 无手写样式表
+
+- **WHEN** 检查仿真分区新增的文件
+- **THEN** 不存在新增的 `.css` / `.less` / `.scss` 文件，页面样式来源于 antd 组件与主题 token
+
+#### Scenario: 图表按需注册
+
+- **WHEN** 检查仿真分区的图表引入路径
+- **THEN** 图表均经由共享封装组件使用，未出现直接的全量 ECharts 引入，也未引入其他图表库
+
+#### Scenario: 后端错误可见
+
+- **WHEN** 任一仿真页面的请求返回错误
+- **THEN** 页面展示该错误的信息，SHALL NOT 静默吞掉
+

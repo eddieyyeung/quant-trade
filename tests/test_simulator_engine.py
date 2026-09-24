@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from quant_trade.data.schema import init_db
 from quant_trade.data.store import DataStore
@@ -135,6 +136,46 @@ class TestSimulatorEngine:
             assert step_result.decision is not None
             assert step_result.decision.notes == "测试买入茅台"
 
+    def test_buy_order_carries_its_reason_to_the_fill(self) -> None:
+        """A recommendation's stated reason survives into the executed order.
+
+        The engine used to read ``order.reason`` behind a ``hasattr`` guard,
+        but ``OrderRequest`` had no such field — so every fill was recorded as
+        a discretionary one and the strategy's own rationale was dropped.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_engine_db(db_path)
+            sim = Simulator(store=store, db_path=db_path, data_dir=tmp)
+
+            create_result = sim.create(name="理由透传测试", start_date=BASE_START)
+            sid = create_result["session_id"]
+
+            orders = [
+                OrderRequest(ts_code="600519.SH", target_pct=0.2, direction="BUY", reason="综合得分 2.31"),
+            ]
+            step_result = sim.step(sid, orders)
+
+            buys = [o for o in step_result.decision.executed_orders if o.direction == "BUY"]
+            assert buys, "expected the buy order to fill"
+            assert buys[0].reason == "综合得分 2.31"
+
+    def test_buy_order_without_reason_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = tmp + "/test.db"
+            store = _build_engine_db(db_path)
+            sim = Simulator(store=store, db_path=db_path, data_dir=tmp)
+
+            create_result = sim.create(name="无理由回退测试", start_date=BASE_START)
+            sid = create_result["session_id"]
+
+            orders = [OrderRequest(ts_code="600519.SH", target_pct=0.2, direction="BUY")]
+            step_result = sim.step(sid, orders)
+
+            buys = [o for o in step_result.decision.executed_orders if o.direction == "BUY"]
+            assert buys, "expected the buy order to fill"
+            assert buys[0].reason == "用户主动建仓"
+
     def test_status_returns_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = tmp + "/test.db"
@@ -209,3 +250,33 @@ class TestSimulatorEngine:
                 raise AssertionError("Should have raised ValueError")
             except ValueError:
                 pass
+
+
+class TestSimulatorStoreFallback:
+    """A store-less `Simulator` resolves the configured database.
+
+    `db_path` used to default to the literal `"data/quant.db"`, so this class
+    opened the repository's own database regardless of what the process was
+    configured to use — the defect the store-injection work removed everywhere
+    else. No call site relied on it, so nothing caught it.
+    """
+
+    def test_default_db_path_follows_the_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            configured = str(Path(tmp) / "configured.db")
+            config = Path(tmp) / "config.yaml"
+            config.write_text(f"data:\n  db_path: {configured}\n", encoding="utf-8")
+            monkeypatch.setenv("QUANT_CONFIG", str(config))
+
+            sim = Simulator(data_dir=tmp)
+
+            assert sim._store.db_path == configured
+
+    def test_explicit_path_still_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.setenv("QUANT_CONFIG", str(Path(tmp) / "config.yaml"))
+            explicit = str(Path(tmp) / "explicit.db")
+
+            sim = Simulator(db_path=explicit, data_dir=tmp)
+
+            assert sim._store.db_path == explicit

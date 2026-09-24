@@ -47,7 +47,9 @@ class FactorRankingStrategy(Strategy):
         self.top_n = top_n
         self.factor_weights = factor_weights or {}
         self.max_industry_weight = max_industry_weight
-        self.store = store or DataStore()
+        # Narrowed to non-optional: this strategy always ends up with a store,
+        # whether the caller supplied one or not.
+        self.store: DataStore = store or DataStore()
 
     def generate_signals(
         self,
@@ -60,7 +62,7 @@ class FactorRankingStrategy(Strategy):
         # Step 1: Compute all factor values
         factor_scores: dict[str, pd.Series] = {}
         for fname in self.enabled_factors:
-            factor = factor_registry.get(fname)
+            factor = factor_registry.get(fname, store=store)
             if factor is None:
                 logger.warning(f"Factor {fname} not found in registry, skipping")
                 continue

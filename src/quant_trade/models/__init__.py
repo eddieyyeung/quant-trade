@@ -4,6 +4,7 @@ from quant_trade.models.evaluate import rank_ic_series
 from quant_trade.models.features import build_feature_matrix, build_label
 from quant_trade.models.train import (
     TrainConfig,
+    WalkForwardResult,
     load_predictions,
     save_predictions,
     walk_forward_train,
@@ -11,6 +12,7 @@ from quant_trade.models.train import (
 
 __all__ = [
     "TrainConfig",
+    "WalkForwardResult",
     "build_feature_matrix",
     "build_label",
     "load_predictions",
