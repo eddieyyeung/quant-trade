@@ -12,6 +12,7 @@ class OrderRequest:
     ts_code: str
     target_pct: float  # 0.0 = sell all, >0 = buy to this weight
     direction: str = "BUY"  # BUY or SELL
+    reason: str = ""  # why this order exists — carried through to the fill
 
 
 @dataclass
@@ -85,6 +86,11 @@ class Snapshot:
     cash: float
     factor_ranking: list[FactorRankItem]
     strategy_signals: list[StrategySignalItem] | None
+    # The same recommendation as `strategy_signals`, already shaped as the
+    # orders the decision endpoint takes. None and [] carry the same meaning as
+    # they do for the signals: no reference strategy, versus one that was quiet.
+    recommended_orders: list[OrderRequest] | None = None
+    recommendation_source: str | None = None
     data_warnings: list[str] = field(default_factory=list)
 
 
@@ -117,19 +123,30 @@ class StepResult:
 
 
 @dataclass
+class WeeklyDeviation:
+    """How one week's decision lines up with what was recommended for it.
+
+    Compares the two *target portfolios* — the buy targets each side was aiming
+    at — rather than the orders or the resulting holdings. The same portfolio
+    can be reached by different orders (two separate buys, a buy then a trim),
+    and an order-level comparison would call that a deviation.
+    """
+
+    followed: bool
+    dropped: list[str]  # recommended, the user skipped
+    added: list[str]  # the user added, not recommended
+
+
+@dataclass
 class WeeklyDiff:
-    """Per-week comparison of manual vs strategy decisions."""
+    """Per-week comparison of a decision against the week's recommendation."""
 
     week_number: int
     cursor_date: date
-    user_holds: list[str]  # codes user held this week
-    strategy_holds: list[str]  # codes strategy held this week
-    user_only: list[str]
-    strategy_only: list[str]
-    common: list[str]
-    overlap_count: int
-    total_user: int
-    total_strategy: int
+    # None means there was no recommendation to compare against — no reference
+    # strategy, or none that produced signals. Distinct from a deviation that
+    # happens to be empty, which means "you followed it exactly".
+    deviation: WeeklyDeviation | None = None
     concentration_warning: str | None = None
     drawdown_warning: str | None = None
 
@@ -145,4 +162,8 @@ class ComparisonResult:
     nav_benchmark: list[dict[str, Any]] | None
     metrics: dict[str, dict[str, float]]
     weekly_diffs: list[WeeklyDiff]
+    # Why the strategy line is missing, when it is. A failing strategy must not
+    # cost the manual and benchmark lines their report, but it also must not
+    # disappear without a word — silence is how the date-type bug hid.
+    strategy_error: str | None = None
     html_path: str | None = None

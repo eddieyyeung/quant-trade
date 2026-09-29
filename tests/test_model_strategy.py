@@ -92,6 +92,10 @@ class TestSignals:
 
 class TestRegistration:
     def test_registered_as_model_ranking(self) -> None:
-        strat = strategy_registry.get("model_ranking")
+        # With a store, so the registry's injection path is what runs. Without
+        # one the strategy falls back to a connection of its own — which works,
+        # but exercises the branch the injection work exists to avoid.
+        with tempfile.TemporaryDirectory() as tmp:
+            strat = strategy_registry.get("model_ranking", store=DataStore(f"{tmp}/m.db"))
         assert strat is not None
         assert strat.name == "model_ranking"

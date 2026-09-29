@@ -17,6 +17,7 @@ from quant_trade.backtest.rules import (
 from quant_trade.data.calendar import TradeCalendar
 from quant_trade.data.index_weights import get_default_universe
 from quant_trade.data.store import DataStore
+from quant_trade.services.context import NULL_CONTEXT, RunContext
 from quant_trade.strategies.base import Order, Strategy
 
 
@@ -31,6 +32,7 @@ def run_backtest(
     transfer_fee_rate: float = 0.00001,
     benchmark_code: str = "000300.SH",
     store: DataStore | None = None,
+    ctx: RunContext = NULL_CONTEXT,
 ) -> dict[str, Any]:
     """
     Run a weekly-rebalanced backtest with A-share trading rules.
@@ -41,6 +43,7 @@ def run_backtest(
         trade_log: list of trade dicts
         metrics: dict of performance metrics
         portfolio: final Portfolio state
+        cancelled: whether the run stopped early because ``ctx`` asked it to
     """
     ds = store or DataStore()
 
@@ -48,9 +51,16 @@ def run_backtest(
     portfolio = Portfolio(cash=initial_capital, initial_capital=initial_capital)
     calendar = TradeCalendar(ds.get_calendar(start, end)["trade_date"].tolist())
 
+    # The calendar is loaded from `start`, so it holds no date before it. A
+    # `start` that is not itself a trading day would make the week scan find no
+    # anchor and return nothing, so normalise first — same as Simulator does.
+    actual_start = calendar.next_trade_date(start) or start
+    if actual_start != start:
+        logger.info(f"Backtest start {start} is not a trade date; using {actual_start}")
+
     # Get weekly rebalance dates
-    weeks = calendar.weeks_between(start, end)
-    all_trade_dates = calendar.trade_dates_between(start, end)
+    weeks = calendar.weeks_between(actual_start, end)
+    all_trade_dates = calendar.trade_dates_between(actual_start, end)
     if not weeks or not all_trade_dates:
         logger.error("No trading weeks found in the period")
         return _empty_result(initial_capital)
@@ -78,7 +88,17 @@ def run_backtest(
     close_map = _load_close_map(ds, sorted(all_codes), start, end)
     benchmark_nav = _fetch_benchmark(ds, benchmark_code, start, end)
 
-    for (signal_date, exec_date), universe in zip(weeks, weekly_universes, strict=False):
+    total_weeks = len(weeks)
+    cancelled = False
+    for week_index, ((signal_date, exec_date), universe) in enumerate(zip(weeks, weekly_universes, strict=False)):
+        if ctx.cancelled():
+            ctx.log(f"Backtest cancelled after {week_index}/{total_weeks} weeks", level="warning")
+            cancelled = True
+            break
+        ctx.progress(
+            week_index / total_weeks if total_weeks else 1.0, f"Week {week_index + 1}/{total_weeks} ({signal_date})"
+        )
+
         if not universe:
             continue
 
@@ -223,12 +243,20 @@ def run_backtest(
         # Only append the trades newly added this week (trade_log is cumulative)
         trade_log_all.extend(portfolio.trade_log[prev_log_len:])
 
-    # Record remaining NAV
-    _record_nav(nav_records, portfolio, all_trade_dates[recorded_idx:], close_map)
+    # Record remaining NAV — but not when the run was cancelled, where the
+    # result must stop where the work stopped rather than extend a flat line
+    # to the end of the requested window.
+    if not cancelled:
+        _record_nav(nav_records, portfolio, all_trade_dates[recorded_idx:], close_map)
 
     # Build NAV series
-    nav_df = pd.DataFrame(nav_records).drop_duplicates(subset=["trade_date"]).set_index("trade_date").sort_index()
-    nav_series = nav_df["nav"]
+    if nav_records:
+        nav_df = pd.DataFrame(nav_records).drop_duplicates(subset=["trade_date"]).set_index("trade_date").sort_index()
+        nav_series = nav_df["nav"]
+    else:
+        # Cancelled before any week ran: an empty frame has no "trade_date"
+        # column to de-duplicate on, and compute_metrics handles empty.
+        nav_series = pd.Series(dtype=float)
 
     # Compute metrics
     metrics = compute_metrics(nav_series, benchmark_nav, initial_capital)
@@ -240,6 +268,7 @@ def run_backtest(
         "trade_log": trade_log_all,
         "metrics": metrics,
         "portfolio": portfolio,
+        "cancelled": cancelled,
     }
 
 
@@ -321,45 +350,6 @@ def compute_metrics(
         "excess_return": round(excess_return, 4),
         "total_trades": 0,  # populated below
         "turnover": round(turnover, 4),
-    }
-
-
-def generate_signals_for_today(
-    strategy: Strategy,
-    store: DataStore | None = None,
-) -> dict[str, Any]:
-    """
-    Generate signals for the current week (paper trading mode).
-    Uses Friday's close if today is after Friday, or the last Friday's close.
-    """
-    ds = store or DataStore()
-
-    # Find the most recent trading day
-    today = date.today()
-    latest_trade_date = ds.get_latest_trade_date(today)
-    if latest_trade_date is None:
-        return {"error": "No trade date data available"}
-
-    calendar = TradeCalendar(ds.get_calendar(latest_trade_date, latest_trade_date)["trade_date"].tolist())
-    signal_day = calendar.last_trade_date_of_week(latest_trade_date) or latest_trade_date
-
-    universe = ds.get_universe(get_default_universe(), signal_day)
-
-    signals = strategy.generate_signals(signal_day, universe, ds)
-
-    return {
-        "signal_date": str(signal_day),
-        "orders": [
-            {
-                "ts_code": o.ts_code,
-                "target_pct": o.target_pct,
-                "direction": o.direction,
-                "reason": o.reason,
-            }
-            for o in signals.orders
-        ],
-        "weights": signals.weights,
-        "universe_size": len(universe),
     }
 
 
@@ -449,4 +439,5 @@ def _empty_result(initial_capital: float) -> dict[str, Any]:
         "trade_log": [],
         "metrics": {},
         "portfolio": Portfolio(cash=initial_capital, initial_capital=initial_capital),
+        "cancelled": False,
     }

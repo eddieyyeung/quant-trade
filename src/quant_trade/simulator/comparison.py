@@ -15,10 +15,10 @@ from loguru import logger
 
 from quant_trade.backtest.engine import compute_metrics, run_backtest
 from quant_trade.backtest.portfolio import Portfolio
-from quant_trade.data.calendar import TradeCalendar
+from quant_trade.data.calendar import TradeCalendar, _to_date
 from quant_trade.data.store import DataStore
 from quant_trade.simulator.session import SessionStore
-from quant_trade.simulator.types import ComparisonResult, WeeklyDiff
+from quant_trade.simulator.types import ComparisonResult, WeeklyDeviation, WeeklyDiff
 from quant_trade.strategies.registry import strategy_registry
 
 matplotlib.use("Agg")
@@ -47,9 +47,9 @@ class ComparisonEngine:
 
         # 2. Strategy NAV via run_backtest
         strategy_nav: list[dict[str, Any]] | None = None
-        strategy_holds_by_week: dict[int, list[str]] = {}
+        strategy_error: str | None = None
         if ref_name:
-            strategy_nav, strategy_holds_by_week = self._run_strategy_shadow(
+            strategy_nav, strategy_error = self._run_strategy_shadow(
                 ref_name, start_date, end_date, row["initial_capital"]
             )
 
@@ -60,7 +60,7 @@ class ComparisonEngine:
         metrics = self._compute_metrics_triple(manual_nav, strategy_nav, benchmark_nav)
 
         # 5. Build weekly diffs
-        weekly_diffs = self._build_weekly_diffs(decisions, strategy_holds_by_week)
+        weekly_diffs = self._build_weekly_diffs(decisions)
 
         # 6. Annotate extremes
         weekly_diffs = self._annotate_extremes(weekly_diffs, manual_nav)
@@ -73,6 +73,7 @@ class ComparisonEngine:
             nav_benchmark=benchmark_nav,
             metrics=metrics,
             weekly_diffs=weekly_diffs,
+            strategy_error=strategy_error,
         )
 
         if export_html:
@@ -139,11 +140,17 @@ class ComparisonEngine:
 
     def _run_strategy_shadow(
         self, ref_name: str, start: date, end: date, initial_capital: float
-    ) -> tuple[list[dict[str, Any]] | None, dict[int, list[str]]]:
-        """Run strategy backtest and return NAV + per-week holdings."""
-        strategy = strategy_registry.get(str(ref_name))
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Run the strategy over the same window. Returns (NAV, failure reason).
+
+        The reason is returned rather than thrown: the manual and benchmark
+        lines are still worth reporting without the strategy, but a strategy
+        that quietly fails to produce a line is indistinguishable on screen
+        from one that had nothing to say.
+        """
+        strategy = strategy_registry.get(str(ref_name), store=self._store)
         if strategy is None:
-            return None, {}
+            return None, f"参考策略 {ref_name} 未注册"
 
         try:
             result = run_backtest(
@@ -155,17 +162,19 @@ class ComparisonEngine:
             )
         except Exception as e:
             logger.warning(f"Strategy backtest failed: {e}")
-            return None, {}
+            return None, f"策略回测失败: {e}"
 
         nav_series = result.get("nav_series")
         if nav_series is None or nav_series.empty:
-            return None, {}
+            return None, "策略回测没有产生净值序列"
 
         nav: list[dict[str, Any]] = []
         if isinstance(nav_series, pd.Series):
             for idx, val in nav_series.items():
-                nav.append({"trade_date": str(_to_date(idx)), "nav": round(float(val), 2)})
-        return nav, {}
+                # The index is a DatetimeIndex; pandas just types the key of
+                # `items()` as Hashable.
+                nav.append({"trade_date": str(_to_date(cast(pd.Timestamp, idx))), "nav": round(float(val), 2)})
+        return nav, None
 
     def _compute_benchmark(self, start: date, end: date) -> list[dict[str, Any]]:
         """Get CSI 300 normalized NAV."""
@@ -221,53 +230,47 @@ class ComparisonEngine:
         s = pd.Series(values, index=pd.DatetimeIndex(dates))
         return compute_metrics(s)
 
-    def _build_weekly_diffs(self, decisions: list[Any], strategy_holds: dict[int, list[str]]) -> list[WeeklyDiff]:
-        """Compare user decisions vs strategy week by week."""
+    def _build_weekly_diffs(self, decisions: list[Any]) -> list[WeeklyDiff]:
+        """Compare each week's decision with the recommendation it was given.
+
+        Both sides come from the decision record's own ``user_orders`` and
+        ``strategy_orders``, so this needs no shadow backtest — it answers "did
+        I take the advice", not "how would I have done in a universe where I
+        always did".
+        """
         diffs: list[WeeklyDiff] = []
         for d in decisions:
-            user_codes = [o.ts_code for o in d.executed_orders if o.direction == "BUY"]
-            strategy_codes = strategy_holds.get(d.decision_number, [])
+            deviation = _deviation(d.user_orders, d.strategy_orders)
 
-            user_set = set(user_codes)
-            strategy_set = set(strategy_codes)
-
-            common = sorted(user_set & strategy_set)
-            user_only = sorted(user_set - strategy_set)
-            strategy_only = sorted(strategy_set - user_set)
+            concentration: str | None = None
+            targets = _target_portfolio(d.user_orders)
+            if 0 < len(targets) <= 2:
+                concentration = f"持仓过度集中: {len(targets)}只"
 
             diffs.append(
                 WeeklyDiff(
                     week_number=d.decision_number,
                     cursor_date=_to_date(d.cursor_date),
-                    user_holds=sorted(user_codes),
-                    strategy_holds=sorted(strategy_codes),
-                    user_only=user_only,
-                    strategy_only=strategy_only,
-                    common=common,
-                    overlap_count=len(common),
-                    total_user=len(user_codes),
-                    total_strategy=len(strategy_codes),
+                    deviation=deviation,
+                    concentration_warning=concentration,
                 )
             )
         return diffs
 
     def _annotate_extremes(self, diffs: list[WeeklyDiff], manual_nav: list[dict[str, Any]]) -> list[WeeklyDiff]:
-        """Annotate concentration and drawdown warnings."""
+        """Annotate drawdown warnings."""
         if len(manual_nav) < 3:
             return diffs
 
         values = [float(item["nav"]) for item in manual_nav]
         for i, diff in enumerate(diffs):
-            # Concentration: ≤2 stocks held
-            if diff.total_user <= 2 and diff.total_user > 0:
-                diff.concentration_warning = f"持仓过度集中: {diff.total_user}只"
-
-            # Weekly drawdown
-            if i > 0 and i <= len(values) - 1:
+            # Weekly drawdown. The guard already bounds `i` to the last index,
+            # so `values[i]` is always in range — there is no fallback case to
+            # handle here.
+            if i > 0 and i < len(values):
                 prev_val = values[i - 1]
-                curr_val = min(values[i], values[-1]) if i >= len(values) else values[i]
                 if prev_val > 0:
-                    weekly_return = (curr_val - prev_val) / prev_val
+                    weekly_return = (values[i] - prev_val) / prev_val
                     if weekly_return < -0.10:
                         diff.drawdown_warning = f"周回撤: {weekly_return:.1%}"
         return diffs
@@ -288,13 +291,20 @@ class ComparisonEngine:
                 warnings_html += f'<span class="warn">⚠️ {d.concentration_warning}</span> '
             if d.drawdown_warning:
                 warnings_html += f'<span class="warn">📉 {d.drawdown_warning}</span>'
+            if d.deviation is None:
+                followed_html = "无参考策略"
+                dropped_html = added_html = "-"
+            else:
+                followed_html = "是" if d.deviation.followed else "否"
+                dropped_html = ", ".join(d.deviation.dropped) or "-"
+                added_html = ", ".join(d.deviation.added) or "-"
             diff_rows += f"""
             <tr>
                 <td>{d.week_number}</td>
                 <td>{d.cursor_date}</td>
-                <td>{", ".join(d.user_only) or "-"}</td>
-                <td>{", ".join(d.strategy_only) or "-"}</td>
-                <td>{", ".join(d.common) or "-"}</td>
+                <td>{followed_html}</td>
+                <td>{dropped_html}</td>
+                <td>{added_html}</td>
                 <td>{warnings_html or "-"}</td>
             </tr>"""
 
@@ -326,7 +336,7 @@ th{{background:#f1f5f9}}
 
 <h2>逐周决策差异</h2>
 <table>
-<tr><th>周</th><th>日期</th><th>你选了(策略未选)</th><th>策略选了(你未选)</th><th>共同</th><th>风险标注</th></tr>
+<tr><th>周</th><th>日期</th><th>完全跟随</th><th>你剔除</th><th>你额外加</th><th>风险标注</th></tr>
 {diff_rows}
 </table>
 </body></html>"""
@@ -398,12 +408,31 @@ th{{background:#f1f5f9}}
         return "\n".join(html_parts)
 
 
-def _to_date(d: Any) -> date:
-    """Convert various representations to date."""
-    if isinstance(d, date):
-        return d
-    if hasattr(d, "date"):
-        return cast(date, d.date())
-    if isinstance(d, str):
-        return date.fromisoformat(d[:10])
-    return date.today()
+def _target_portfolio(orders: Any) -> set[str]:
+    """The portfolio a week's orders were aiming at.
+
+    Only positive-weight buys count. Sells need no separate handling: a name
+    dropped from the targets simply is not in the set, which is the same fact
+    stated once instead of twice.
+    """
+    return {o.ts_code for o in orders if o.direction == "BUY" and o.target_pct > 0}
+
+
+def _deviation(user_orders: Any, strategy_orders: Any) -> WeeklyDeviation | None:
+    """Compare what the user aimed at with what was recommended.
+
+    ``strategy_orders`` of ``None`` means there was nothing to compare against —
+    no reference strategy, or one that produced no signals. That is not the same
+    as having followed the recommendation, so it stays ``None`` rather than
+    becoming an empty, "you followed it" deviation.
+    """
+    if strategy_orders is None:
+        return None
+
+    recommended = _target_portfolio(strategy_orders)
+    chosen = _target_portfolio(user_orders)
+    return WeeklyDeviation(
+        followed=chosen == recommended,
+        dropped=sorted(recommended - chosen),
+        added=sorted(chosen - recommended),
+    )

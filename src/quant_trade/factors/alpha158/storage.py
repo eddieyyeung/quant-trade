@@ -28,6 +28,32 @@ def save_factor_values(store: DataStore, values: pd.DataFrame) -> int:
     return len(values)
 
 
+def load_factor_coverage(store: DataStore) -> pd.DataFrame:
+    """Per-factor row counts and date span of ``factor_values``.
+
+    One aggregate over the table. Factors with no rows are absent rather than
+    present with zeros — the caller distinguishes "not persisted" from
+    "persisted but empty", and a zero row would erase that distinction.
+
+    Returns:
+        DataFrame with columns ``factor_name``, ``rows``, ``earliest``, ``latest``.
+    """
+    sql = """
+        SELECT factor_name,
+               COUNT(*)        AS rows,
+               MIN(trade_date) AS earliest,
+               MAX(trade_date) AS latest
+        FROM factor_values
+        GROUP BY factor_name
+        ORDER BY factor_name
+    """
+    try:
+        return store.conn.execute(sql).df()
+    except Exception as e:
+        logger.warning(f"load_factor_coverage query failed: {e}")
+        return pd.DataFrame(columns=["factor_name", "rows", "earliest", "latest"])
+
+
 def get_factor_values(
     store: DataStore,
     factors: list[str],

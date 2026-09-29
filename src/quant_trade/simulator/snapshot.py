@@ -13,6 +13,7 @@ from quant_trade.data.calendar import TradeCalendar
 from quant_trade.data.store import DataStore
 from quant_trade.factors.preprocess import preprocess
 from quant_trade.factors.registry import registry as factor_registry
+from quant_trade.simulator.recommendation import to_recommended_orders
 from quant_trade.simulator.types import (
     FactorRankItem,
     MarketOverview,
@@ -61,6 +62,8 @@ class SnapshotBuilder:
             logger.info("Skipping factor ranking and strategy signals (deferred to first step)")
             ranking: list[FactorRankItem] = []
             strategy_signals = None
+            recommended_orders = None
+            recommendation_source = None
             all_warnings.append("因子和策略信号将在首次调仓时计算")
         else:
             logger.info("Snapshot: building factor ranking...")
@@ -68,6 +71,15 @@ class SnapshotBuilder:
 
             logger.info("Snapshot: building strategy signals...")
             strategy_signals = self._build_strategy_signals(cursor_date, universe)
+
+            # Derived from the signals just built rather than recomputed: the
+            # reference strategy already costs one full factor pass, and asking
+            # it again on click would make that a third.
+            recommended_orders = to_recommended_orders(strategy_signals)
+            # A strategy that raised also yields None here, and a failed
+            # recommendation must not claim a source it never produced.
+            reference = self._ref_strategy
+            recommendation_source = reference.name if recommended_orders is not None and reference is not None else None
 
             all_warnings.extend(data_warnings)
             if not strategy_signals and self._ref_strategy is not None:
@@ -84,6 +96,8 @@ class SnapshotBuilder:
             cash=self._portfolio.cash,
             factor_ranking=ranking,
             strategy_signals=strategy_signals,
+            recommended_orders=recommended_orders,
+            recommendation_source=recommendation_source,
             data_warnings=all_warnings,
         )
 

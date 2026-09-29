@@ -17,8 +17,8 @@ class ModelStrategy(Strategy):
     """Select top-N stocks by model prediction score, equal weight.
 
     Prediction scores are loaded from a persisted parquet produced by
-    ``quant-trade model train``. Dates without predictions return an empty
-    signal (no rebalance).
+    :func:`quant_trade.services.models.train_model`. Dates without predictions
+    return an empty signal (no rebalance).
     """
 
     name = "model_ranking"
@@ -33,7 +33,9 @@ class ModelStrategy(Strategy):
         self.predictions_path = predictions_path
         self.top_n = top_n
         self.max_industry_weight = max_industry_weight
-        self.store = store or DataStore()
+        # Narrowed to non-optional: this strategy always ends up with a store,
+        # whether the caller supplied one or not.
+        self.store: DataStore = store or DataStore()
         self._predictions: pd.DataFrame | None = None
 
     @property

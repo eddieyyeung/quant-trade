@@ -33,9 +33,16 @@ class Simulator:
     def __init__(
         self,
         store: DataStore | None = None,
-        db_path: str = "data/quant.db",
+        db_path: str | None = None,
         data_dir: str = "data",
     ) -> None:
+        """Hold the caller's store, or resolve the configured database.
+
+        ``db_path`` used to default to a literal ``"data/quant.db"``, which made
+        a store-less ``Simulator()`` open the repository's own database no
+        matter what the process was configured to use. ``None`` now means "ask
+        the config", the same rule every other component follows.
+        """
         self._store = store or DataStore(db_path)
         self._sessions = SessionStore(self._store.conn, data_dir)
 
@@ -91,7 +98,7 @@ class Simulator:
         # Get reference strategy instance
         ref_strategy: Strategy | None = None
         if reference_strategy:
-            ref_strategy = strategy_registry.get(reference_strategy)
+            ref_strategy = strategy_registry.get(reference_strategy, store=self._store)
             if ref_strategy is None:
                 logger.warning(f"Reference strategy '{reference_strategy}' not found, running without reference")
             else:
@@ -154,7 +161,7 @@ class Simulator:
         ref_strategy: Strategy | None = None
         ref_name = row.get("reference_strategy")
         if ref_name:
-            ref_strategy = strategy_registry.get(str(ref_name))
+            ref_strategy = strategy_registry.get(str(ref_name), store=self._store)
 
         universe = self._store.get_universe(get_default_universe(), cursor_date)
         exec_date = weeks[next_week_idx][1] if next_week_idx < len(weeks) else cursor_date
@@ -209,7 +216,7 @@ class Simulator:
         ref_strategy: Strategy | None = None
         ref_name = row.get("reference_strategy")
         if ref_name:
-            ref_strategy = strategy_registry.get(str(ref_name))
+            ref_strategy = strategy_registry.get(str(ref_name), store=self._store)
 
         # Build pre-decision snapshot
         snapshot_builder = SnapshotBuilder(self._store, portfolio, ref_strategy)
@@ -374,7 +381,7 @@ class Simulator:
                             shares=shares,
                             price=price,
                             cost_or_proceeds=round(cost, 2),
-                            reason=order.reason if hasattr(order, "reason") and order.reason else "用户主动建仓",
+                            reason=order.reason or "用户主动建仓",
                         )
                     )
                 elif buy_amount > 0:
@@ -486,7 +493,7 @@ class Simulator:
         ref_strategy: Strategy | None = None
         ref_name = row.get("reference_strategy")
         if ref_name:
-            ref_strategy = strategy_registry.get(str(ref_name))
+            ref_strategy = strategy_registry.get(str(ref_name), store=self._store)
 
         cal_df = self._store.get_calendar(start_date, end_date or date.today())
         calendar = TradeCalendar(cal_df["trade_date"].tolist())

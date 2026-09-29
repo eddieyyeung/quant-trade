@@ -68,7 +68,8 @@ class TestWalkForward:
             # Factors must exist before `start` so the first training window is non-empty
             _with_factors(store, date(2023, 10, 1), end)
             cfg = TrainConfig(train_years=0.2, valid_years=0.1, predict_months=1)
-            preds, matrix = walk_forward_train(store, CODES, start, end, config=cfg)
+            result = walk_forward_train(store, CODES, start, end, config=cfg)
+            preds, matrix = result.predictions, result.feature_matrix
 
             assert not preds.empty
             assert set(preds.columns) == {"ts_code", "trade_date", "score"}
@@ -87,8 +88,9 @@ class TestWalkForward:
     def test_empty_universe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = _build_synthetic(tmp + "/a.db")
-            preds, _ = walk_forward_train(store, [], date(2024, 2, 1), date(2024, 3, 1))
-            assert preds.empty
+            result = walk_forward_train(store, [], date(2024, 2, 1), date(2024, 3, 1))
+            assert result.predictions.empty
+            assert result.windows_trained == 0
 
 
 class TestRankIC:

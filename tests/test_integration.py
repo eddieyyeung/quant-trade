@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_trade.backtest.engine import run_backtest
 from quant_trade.backtest.portfolio import Portfolio
@@ -136,9 +137,11 @@ def test_data_to_factor_pipeline():
         assert latest is not None
 
         for fname in ["momentum_20d", "pb_ratio", "roe_ttm"]:
-            factor = factor_registry.get(fname)
+            # Through the registry, not by assigning `.store` afterwards: the
+            # attribute poke was what the store-injection change removed, and
+            # leaving it here would re-normalise the pattern.
+            factor = factor_registry.get(fname, store=store)
             assert factor is not None, f"Factor {fname} should be registered"
-            factor.store = store  # Inject mock DB
             vals = factor.compute(latest, universe)
             assert isinstance(vals, pd.Series), f"Factor {fname} should return Series"
             assert len(vals) > 0, f"Factor {fname} returned empty Series"
@@ -198,6 +201,210 @@ def test_strategy_to_backtest_pipeline():
         portfolio = result.get("portfolio")
         assert portfolio is not None
         assert portfolio.initial_capital == 100_000
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def _weekend_before(d: date) -> date:
+    """Step back from ``d`` until landing on a Saturday or Sunday."""
+    while d.weekday() < 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _mock_db_with_start(tmpdir: str) -> tuple[DataStore, date]:
+    """Build a mock database and return it with a trade date inside its range."""
+    store = _build_mock_db(str(Path(tmpdir) / "test.db"), n_stocks=20, n_days=180)
+    dates = store.get_calendar(date.today() - timedelta(days=140), date.today())["trade_date"]
+    start = dates.iloc[min(10, len(dates) - 1)]
+    if hasattr(start, "date"):
+        start = start.date()
+    return store, start
+
+
+def test_backtest_starting_on_non_trading_day():
+    """Regression: a start date on a weekend must not yield an empty backtest.
+
+    The calendar is loaded from ``start``, so it never holds an earlier date. An
+    un-normalised start therefore left the week scan without an anchor, and it
+    silently returned zero weeks — and therefore no metrics and no NAV at all.
+    """
+    tmpdir = tempfile.mkdtemp()
+    try:
+        store, trade_date = _mock_db_with_start(tmpdir)
+        weekend_start = _weekend_before(trade_date)
+        assert weekend_start.weekday() >= 5, "fixture must start on a weekend"
+
+        strategy = strategy_registry.get("factor_ranking")
+        assert strategy is not None
+        strategy.top_n = 5
+
+        result = run_backtest(
+            strategy=strategy,
+            start=weekend_start,
+            end=date.today(),
+            initial_capital=100_000,
+            store=store,
+        )
+
+        assert result["metrics"], "weekend start must still produce metrics"
+        total_return = result["metrics"]["total_return"]
+        assert total_return == total_return, "total_return must not be NaN"
+
+        nav = result["nav_series"]
+        assert not nav.empty, "NAV series must not be empty for a weekend start"
+        assert nav.index[0] >= weekend_start
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_backtest_starting_on_trading_day_unchanged():
+    """A start date that is already a trade date must be used as-is."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        store, trade_date = _mock_db_with_start(tmpdir)
+
+        strategy = strategy_registry.get("factor_ranking")
+        assert strategy is not None
+        strategy.top_n = 5
+
+        result = run_backtest(
+            strategy=strategy,
+            start=trade_date,
+            end=date.today(),
+            initial_capital=100_000,
+            store=store,
+        )
+
+        nav = result["nav_series"]
+        assert not nav.empty
+        assert nav.index[0] == trade_date, "a trading-day start must not be shifted"
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_backtest_window_without_trade_dates():
+    """A window with no trading days returns an empty result rather than raising."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        store, _ = _mock_db_with_start(tmpdir)
+
+        strategy = strategy_registry.get("factor_ranking")
+        assert strategy is not None
+
+        future = date.today() + timedelta(days=10)
+        result = run_backtest(
+            strategy=strategy,
+            start=future,
+            end=future + timedelta(days=10),
+            initial_capital=100_000,
+            store=store,
+        )
+
+        assert result["metrics"] == {}
+        assert result["nav_series"].empty
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+HOLIDAYS = [date(2025, 1, 1), date(2025, 10, 1)]
+
+
+@pytest.mark.parametrize("holiday", HOLIDAYS)
+def test_backtest_starting_on_a_holiday(holiday: date) -> None:
+    """A holiday start normalises to the next trade date instead of yielding nothing.
+
+    The mock calendar is weekdays-only, so the holiday is carved out of it to
+    reproduce a real market closure.
+    """
+    tmpdir = tempfile.mkdtemp()
+    try:
+        store, _ = _mock_db_with_start(tmpdir)
+        store.conn.execute("DELETE FROM trade_calendar WHERE trade_date = ?", [holiday])
+
+        strategy = strategy_registry.get("factor_ranking")
+        assert strategy is not None
+        strategy.top_n = 5
+
+        calendar = TradeCalendar(store.get_calendar(holiday, date.today())["trade_date"].tolist())
+        expected_start = calendar.next_trade_date(holiday)
+        assert expected_start is not None and expected_start != holiday
+
+        result = run_backtest(
+            strategy=strategy,
+            start=holiday,
+            end=date.today(),
+            initial_capital=100_000,
+            store=store,
+        )
+
+        assert result["metrics"], "a holiday start must still produce metrics"
+        nav = result["nav_series"]
+        assert not nav.empty
+        assert nav.index[0] == expected_start
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_default_config_start_produces_a_valid_backtest() -> None:
+    """The shipped default start (2015-01-01, a holiday) must yield a real backtest.
+
+    The default being a non-trading day is exactly what made every default-
+    configured run silently empty, so it is worth pinning.
+    """
+    from quant_trade.services import RunContext
+    from quant_trade.services.backtest import BacktestParams, run_backtest_service
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        store, _ = _mock_db_with_start(tmpdir)
+        config = AppConfig()
+        config.data.db_path = store.db_path
+        config.backtest.start_date = date(2025, 1, 1)
+        store.conn.execute("DELETE FROM trade_calendar WHERE trade_date = ?", [config.backtest.start_date])
+
+        params = BacktestParams.from_config(config)
+        assert params.start == config.backtest.start_date, "start must come from config"
+
+        ctx = RunContext(run_id="default", config=config, store=store)
+        result = run_backtest_service(params, ctx)
+
+        assert result.metrics, "the default config must produce metrics"
+        assert result.nav, "the default config must produce a NAV series"
+        assert result.nav[0].date > config.backtest.start_date
+    finally:
+        shutil.rmtree(tmpdir)
+
+
+def test_backtest_uses_the_same_start_rule_as_the_simulator() -> None:
+    """Both normalise a non-trading-day start to the same day.
+
+    Simulator computes ``calendar.next_trade_date(start)``; the backtest must
+    land on that same date, or the two disagree about which week a run begins
+    in. Pins the two together so changing one side alone breaks the test.
+    """
+    tmpdir = tempfile.mkdtemp()
+    try:
+        store, trade_date = _mock_db_with_start(tmpdir)
+        weekend_start = _weekend_before(trade_date)
+
+        calendar = TradeCalendar(store.get_calendar(weekend_start, date.today())["trade_date"].tolist())
+        simulator_start = calendar.next_trade_date(weekend_start)  # Simulator's rule
+        assert simulator_start is not None
+
+        strategy = strategy_registry.get("factor_ranking")
+        assert strategy is not None
+        strategy.top_n = 5
+
+        result = run_backtest(
+            strategy=strategy,
+            start=weekend_start,
+            end=date.today(),
+            initial_capital=100_000,
+            store=store,
+        )
+
+        assert result["nav_series"].index[0] == simulator_start
     finally:
         shutil.rmtree(tmpdir)
 
@@ -281,14 +488,14 @@ def test_full_pipeline():
         # 1. Factors
         factor_results: dict[str, int] = {}
         for fname in ["momentum_20d", "momentum_60d", "pb_ratio", "roe_ttm"]:
-            factor = factor_registry.get(fname)
-            factor.store = store  # Inject mock DB
+            factor = factor_registry.get(fname, store=store)
+            assert factor.store is store, f"Factor {fname} ignored the injected store"
             vals = factor.compute(latest, universe)
             factor_results[fname] = len(vals)
         assert all(v > 0 for v in factor_results.values()), f"Some factors returned empty: {factor_results}"
 
         # 2. Strategy
-        strategy = strategy_registry.get("factor_ranking")
+        strategy = strategy_registry.get("factor_ranking", store=store)
         strategy.top_n = 8
         signals = strategy.generate_signals(latest, universe, store)
         assert len(signals.orders) > 0

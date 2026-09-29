@@ -8,61 +8,88 @@
 # 1. 安装
 uv sync --extra dev
 
-# 2. 拉取数据（首次全量，约需 5-10 分钟）
-uv run quant-trade data sync
+# 2. 构建前端（首次或前端有改动时）
+cd web && npm install && npm run build && cd ..
 
-# 3. 跑一遍完整周度流程（数据→因子→策略→报告）
-uv run quant-trade weekly
+# 3. 启动平台
+uv run python -m quant_trade
 ```
 
-第 3 步会在 `reports/` 目录生成 HTML 周报，自动用浏览器打开。
+打开 <http://127.0.0.1:9555>。数据同步、因子计算、模型训练、回测都在界面里发起，
+不再需要记忆命令行参数。
 
-## 设计理念
+平台默认只监听本机回环地址。服务没有任何鉴权，若要暴露到局域网需显式指定
+`--host 0.0.0.0`。
 
-```
-数据 → 因子 → 策略 → 回测/信号 → HTML 周报
+### 开发模式
 
-每周五收盘后跑一遍，看周报，手动在券商 APP 下单。
-不需要接券商 API，不需要实时行情，不需要服务器。
-```
-
-核心约束：
-- 日线数据，每周调仓
-- 10 万初始资金模拟盘
-- 沪深 300 + 中证 500 股票池（约 800 只）
-- 多因子打分排名选股，等权 Top-15
-- DuckDB 单文件数据库，零运维
-
-## 命令参考
+前后端分离，前端热更新：
 
 ```bash
-# ===== 数据 =====
-uv run quant-trade data sync                      # 拉取行情+基本信息，增量更新
-uv run quant-trade data sync --include-financials  # 同时拉取财务数据（慢）
-uv run quant-trade data status                    # 查看数据库状态
+uv run python -m quant_trade --reload   # 终端 A：API，端口 9555
+cd web && npm run dev                   # 终端 B：Vite，端口 9333，代理 /api
+```
 
-# ===== 因子 =====
-uv run quant-trade factor update                  # 计算全部启用因子
-uv run quant-trade factor list                    # 列出已注册因子
-uv run quant-trade factor ic                      # 查看因子 IC 摘要
-uv run quant-trade factor alpha158                # 计算并落盘全部 158 个 Alpha158 因子
+### 其他启动参数
 
-# ===== ML 模型 =====
-uv run quant-trade model train                    # LightGBM 滚动重训练，产出预测分
-uv run quant-trade model predict                  # 查看某日模型 Top 选股
-# 用 ML 策略回测：config/default.yaml 中 strategy.name 改为 model_ranking
-uv run quant-trade backtest run
+```bash
+uv run python -m quant_trade --port 9000    # 换端口
+uv run python -m quant_trade --host 0.0.0.0 # 允许外部访问（无鉴权，谨慎）
+```
 
-# ===== 策略 =====
-uv run quant-trade strategy list                  # 列出已注册策略
-uv run quant-trade strategy run                   # 生成当前调仓信号（终端输出）
+启动入口不接受任何子命令 —— 研究操作通过界面发起。
 
-# ===== 回测 =====
-uv run quant-trade backtest run                   # 默认 2015-01-01 至今
-uv run quant-trade backtest run --start 2020-01-01 --end 2025-12-31
+## 研究操作
 
-# ===== 一键报告 =====
-uv run quant-trade weekly                         # 数据→因子→策略→HTML 周报
+每个研究操作都是 `quant_trade.services` 里的一个函数，接受「参数对象 + `RunContext`」，
+返回结构化结果。界面按钮调用的就是这些函数，脚本和 notebook 也可以直接调：
+
+```python
+from quant_trade.config import AppConfig, DEFAULT_CONFIG_PATH
+from quant_trade.data.store import DataStore
+from quant_trade.services import RunContext
+from quant_trade.services.data import DataSyncParams, sync_market_data
+from quant_trade.services.backtest import BacktestParams, run_backtest_service
+
+config = AppConfig.from_yaml(DEFAULT_CONFIG_PATH)
+store = DataStore(config.data.db_path)
+ctx = RunContext(run_id="manual", config=config, store=store)
+
+sync_market_data(DataSyncParams(include_financials=True), ctx)
+
+result = run_backtest_service(BacktestParams(), ctx)
+print(result.metrics["total_return"], len(result.nav), "nav points")
+```
+
+可用的服务函数：
+
+| 领域 | 函数 | 说明 |
+|------|------|------|
+| 数据 | `sync_market_data` | 同步行情、指数权重、日线 |
+| 数据 | `data_status` | 各表行数与日期跨度、股票池规模 |
+| 因子 | `compute_factors` / `compute_alpha158` | 计算注册因子 / 全部 158 个 Alpha158 因子 |
+| 因子 | `factor_ic_summary` | IC / RankIC 统计 |
+| 因子 | `list_factors` | 因子注册表与落盘状态 |
+| 策略 | `generate_strategy_signals` / `list_strategies` | 生成调仓信号 / 列出策略 |
+| 模型 | `train_model` / `predict_for_date` | walk-forward 训练 / 某日 Top 选股 |
+| 模型 | `model_run_list` / `model_evaluation` | 训练历史 / 单次训练的 IC 序列、分年度表现与特征重要性 |
+| 回测 | `run_backtest_service` | 净值、回撤、交易明细、绩效指标 |
+| 报告 | `generate_weekly` | 完整周度流程 → HTML 报告 |
+| 查询 | `list_factor_names` / `universe_coverage` | 已落盘因子名 / 股票池覆盖率 |
+
+长任务通过 `RunContext` 上报进度并响应取消：
+
+```python
+from quant_trade.services import CancelToken, RunContext
+
+token = CancelToken()
+ctx = RunContext(
+    run_id="r1", config=config, store=store,
+    cancel_token=token,
+    progress_sink=lambda pct, msg: print(f"{pct:.0%} {msg}"),
+    log_sink=lambda msg, level: print(f"[{level}] {msg}"),
+)
+# 在另一个线程里调用 token.cancel() 即可中断
 ```
 
 ## 配置
@@ -159,39 +186,32 @@ export TUSHARE_TOKEN=your_token_here
 
 模拟盘 = 回测引擎跑到今天。
 
-```bash
-# 用 strategy run 看当前信号
-uv run quant-trade strategy run
+```python
+from quant_trade.services.strategies import SignalParams, generate_strategy_signals
 
-# 输出示例：
-# Signal date: 2026-07-18 (周五)
-#   🟢 BUY  600519.SH  6.7%  (综合得分 92.3)
-#   🔴 SELL 000858.SZ   →0   (得分跌出 Top-15)
-#   ...
+signals = generate_strategy_signals(SignalParams(), ctx)
+for o in signals.orders:
+    print(o.direction, o.ts_code, f"{o.target_pct:.1%}", o.reason)
 ```
 
-维护 `portfolio.json` 记录虚拟持仓。每周按信号手动操作后更新文件。
+界面上则以表格展示信号，并可逐周记录你的实际决策、与策略决策做对比。
 
-## Web 服务（前后端）
+## Web 界面
 
-模拟盘配有 Web 界面：FastAPI 后端 + React/Vite 前端。前端通过 Vite 代理转发 `/api` 请求到后端。
+平台前端为 React + Vite，后端为 FastAPI，二者由同一个进程提供服务。开发时前端跑在
+Vite dev server（9333），`/api` 请求代理到后端 9555。
 
 ```bash
-# 1. 安装后端依赖（一次性）
-uv sync --extra web
+# 生产：先构建前端，再由后端一起托管
+cd web && npm install && npm run build && cd ..
+uv run python -m quant_trade            # http://127.0.0.1:9555
 
-# 2. 启动后端（终端 1）
-uv run quant-trade sim web
-# API 后端已启动: http://localhost:9555
-
-# 3. 安装并启动前端（终端 2）
-cd web
-npm install
-npm run dev
-# 打开 http://localhost:9333
+# 开发：两个终端
+uv run python -m quant_trade --reload   # 终端 A：API
+cd web && npm run dev                   # 终端 B：Vite，http://localhost:9333
 ```
 
-前端启动后访问 http://localhost:9333，所有 `/api` 请求由 Vite 自动转发到 `http://localhost:9555`（见 `web/vite.config.ts` 的 proxy 配置）。后端默认端口即 9555，与代理一致，如需改端口需同步修改 `web/vite.config.ts`。
+若改了后端端口，需同步修改 `web/vite.config.ts` 的 proxy 目标。
 
 ## 周报
 
