@@ -136,8 +136,109 @@ class TestBacktestSection:
         the account balance rather than excess return (design D12).
         """
         source = _read("src", "pages", "backtest", "Detail.tsx")
-        assert "function rebase(" in source
-        assert "净值（期初 = 1）" in source
+        assert "anchorCurves(" in source, "the curves are not rebased"
+        assert "净值（${curves.day} = 1）" in source, "the axis does not name what it is rebased to"
+
+    def test_detail_rebases_on_the_visible_window_not_on_inception(self) -> None:
+        """Rebase-on-inception makes a zoomed chart lie.
+
+        The strategy reached 2021-01-04 at 0.895 against a benchmark already at
+        1.447, so a window it beat the benchmark in every year of still read as
+        "losing". The anchor is the first point of the window on screen, found
+        on the time axis: `dataZoom` percentages are measured against an extent
+        of timestamps, and trading days are not evenly spaced, so index
+        arithmetic (`start / 100 * (length - 1)`) would drift by weeks.
+        """
+        helper = _read("src", "pages", "backtest", "anchoring.ts")
+        assert "export function anchorIndexAt(" in helper
+        assert "const clamped = Math.min(Math.max(startPercent, 0), 100);" in helper
+        assert "const target = times[0] + (clamped / 100) * (times[count - 1] - times[0]);" in helper
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        assert "anchorCurves(series, window.start)" in source, "the zoom does not move the anchor"
+        # Both options are built at 0%, so "same as inception at full extent" is
+        # structural rather than a second code path that could drift.
+        assert source.count("anchorCurves(series, 0)") == 2, "first paint does not share the builders"
+
+    def test_the_two_zoomed_charts_share_one_anchor(self) -> None:
+        """The excess is the difference of the curves actually drawn.
+
+        Two independent rebases could disagree with the level chart about the
+        same run, and an excess curve anchored to inception while the level
+        chart is anchored to 2021 is a mixed-base quantity that reads negative
+        over a window the strategy won.
+        """
+        helper = _read("src", "pages", "backtest", "anchoring.ts")
+        body = helper[helper.index("export function anchorCurves(") :]
+        assert "nav[i]" in body and "benchmark[i]" in body, "the excess is not the difference of the drawn arrays"
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        assert source.count("anchorCurves(series, window.start)") == 1, "one derivation, fed to both charts"
+
+    def test_the_zoom_is_not_round_tripped_through_react_state(self) -> None:
+        """The wrapper re-applies an option with `notMerge: true`.
+
+        That drops the dataZoom window, so a state-driven re-anchor would reset
+        the zoom on every drag step — and restating `start`/`end` in the option
+        fights the slider the user is holding. The anchor is merged onto the
+        live instance instead.
+        """
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        assert ".setOption(levelAnchor(" in source and "notMerge: false" in source
+        assert "onEvents={levelEvents}" in source
+        # The level chart's own option is the one that must not carry a window:
+        # re-applying it with `notMerge` would snap the slider back on every
+        # change. (The excess chart's option does carry one — it is patched with
+        # the level chart's window, and never re-sent by React.)
+        level = source[source.index("function levelOption(") :]
+        level = level[: level.index("\nfunction ")]
+        window = level[level.index("dataZoom: [") :]
+        assert "start" not in window[: window.index("]")], "the level option must not restate the zoom window"
+
+    def test_the_anchored_options_carry_no_closures(self) -> None:
+        """`fast-deep-equal` compares functions by reference.
+
+        A formatter in one of these options is a new identity on every render,
+        so the wrapper would re-send it with `notMerge` on every trades-page
+        click — resetting the zoom window, and with it the anchor.
+        """
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        for name in ("levelAnchor", "excessAnchor"):
+            body = source[source.index(f"function {name}(") :]
+            body = body[: body.index("\nfunction ")]
+            assert "formatter" not in body, f"{name} builds a closure into the option"
+
+    def test_the_excess_chart_follows_the_level_charts_window(self) -> None:
+        """Its window is reported by the level chart, not chosen by the user."""
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        assert "dataZoom: [{ type: 'inside', disabled: true" in source
+        assert "excessChart.current?.setOption(excessAnchor(series, curves, window)" in source
+
+    def test_the_drawdown_chart_follows_the_same_window(self) -> None:
+        """Three charts, one window: a full-range drawdown under a zoomed NAV
+        curve reads as the same window, which it is not."""
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        assert "drawdownChart.current?.setOption(windowAnchor(window)" in source
+        assert "windowAnchor({ start: 0, end: 100 })" in source, "the first paint has no window"
+
+    def test_the_drawdown_option_carries_no_closures(self) -> None:
+        """It now holds a window, so it must survive the wrapper's deep-equal.
+
+        A `formatter` written inline is a new identity on every render: the
+        wrapper would re-send the option with `notMerge` on the next trades-page
+        click and reset the window to 0-100. Its formatters are module-level, so
+        they compare equal.
+        """
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        body = source[source.index("function drawdownOption(") :]
+        body = body[: body.index("\nfunction ")]
+        assert "formatter: percentage" not in body and "formatter: (" not in body, "inline closure in the option"
+
+    def test_the_visible_anchor_is_readable_from_the_dom(self) -> None:
+        """ECharts draws the axis name into a canvas, so the anchor date is
+        written onto the container the chart lives in — the one place a test or
+        a screen reader can read which day the window is measured from."""
+        source = _read("src", "pages", "backtest", "Detail.tsx")
+        assert "getDom().setAttribute('aria-label'" in source
+        assert "锚定 ${curves.day}" in source
 
     def test_compare_rebases_so_initial_capital_does_not_decide_the_winner(self) -> None:
         """Defining a `rebase` is not the point — the curves must go through it."""

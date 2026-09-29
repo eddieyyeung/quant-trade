@@ -47,6 +47,25 @@ uv run mypy src                            # strict type-check
 - Write one test file per module or area; name test functions `test_*` and add a short docstring.
 - Run a single file with `uv run pytest tests/test_services_data.py` or filter with `-k`.
 
+## Spec Workflow (OpenSpec)
+
+Behaviour changes are described under `openspec/` before they are implemented, and the
+specs in `openspec/specs/` are the contract. Frontend guarantees are pinned by
+`tests/test_ui_shell_contract.py`, which asserts against the web sources — there is no
+JS test runner.
+
+- **Name a change directory without a date.** `openspec archive <name>` adds the archive
+  date itself (`fix-nav-zoom-rebase` → `2026-09-29-fix-nav-zoom-rebase`). The CLI rejects
+  names starting with a digit, so a pre-dated directory cannot be inspected while open.
+- A change holds `.openspec.yaml`, `proposal.md`, `design.md`, `tasks.md`, and
+  `specs/<capability>/spec.md` (the delta). `tasks.md` ends with a verification section.
+- A delta carries `ADDED` / `MODIFIED` / `REMOVED` / `RENAMED` requirements only.
+  `## Purpose` is ignored when a delta is applied — edit the main spec directly when a
+  purpose line goes stale, and record that step in `tasks.md`.
+- A `MODIFIED` requirement restates the whole requirement and must not drop a scenario it
+  already had: keep existing scenario names, add new ones alongside.
+- Finish with `openspec validate --all --strict`, then `openspec archive <name> --yes`.
+
 ## Commit & Pull Request Guidelines
 
 Git history is minimal (a single "Initial commit"), so adopt Conventional Commits going forward: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`. Keep each commit focused, and explain the "why" in the body when it isn't obvious.
